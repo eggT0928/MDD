@@ -26,7 +26,7 @@ st.set_page_config(
 
 st.title("📉 MDD 계산기 대시보드")
 st.caption(
-    "최대낙폭(MDD) 분석, 누적수익률, 낙폭 사건 로그, 벤치마크 비교, 백테스트 요약표까지 한 번에 보는 대시보드입니다."
+    "최대낙폭(MDD) 분석, 누적수익률, 낙폭 사건 로그, 벤치마크 비교, 백테스트 요약표까지 한 번에 보는 Streamlit 버전입니다."
 )
 
 TRADING_DAYS = 252
@@ -464,22 +464,23 @@ def build_metrics_table(price_df: pd.DataFrame, label: str) -> pd.DataFrame:
     years = calendar_days / 365.25
     cagr = float((price_df["Close"].iloc[-1] / price_df["Close"].iloc[0]) ** (1 / years) - 1)
     vol = float(r.std(ddof=1) * np.sqrt(TRADING_DAYS)) if len(r) > 1 else np.nan
-    sharpe = float((r.mean() / r.std(ddof=1)) * np.sqrt(TRADING_DAYS)) if r.std(ddof=1) and not np.isclose(r.std(ddof=1), 0) else np.nan
+    std = r.std(ddof=1)
+    sharpe = float((r.mean() / std) * np.sqrt(TRADING_DAYS)) if pd.notna(std) and not np.isclose(std, 0) else np.nan
 
     downside = r[r < 0]
     downside_std = downside.std(ddof=1)
-    sortino = float((r.mean() / downside_std) * np.sqrt(TRADING_DAYS)) if len(downside) > 1 and downside_std and not np.isclose(downside_std, 0) else np.nan
+    sortino = float((r.mean() / downside_std) * np.sqrt(TRADING_DAYS)) if len(downside) > 1 and pd.notna(downside_std) and not np.isclose(downside_std, 0) else np.nan
 
     dd = price_df["Drawdown"].astype(float)
     ulcer_index = float(np.sqrt(np.mean(np.square(dd.clip(upper=0)))))
-    upi = float(cagr / ulcer_index) if ulcer_index and not np.isclose(ulcer_index, 0) else np.nan
+    upi = float(cagr / ulcer_index) if pd.notna(ulcer_index) and not np.isclose(ulcer_index, 0) else np.nan
     mdd = float(dd.min())
-    uwp = float((r > 0).mean())
+    uwp = float((dd < 0).mean())
 
     out = pd.DataFrame(
         {
-            "지표": ["CAGR", "연변동성", "샤프지수", "소르티노지수", "UPI", "MDD", "UWP(상승일 비율)"],
-            label: [cagr, vol, sharpe, sortino, upi, mdd, uwp],
+            "지표": ["CAGR", "MDD", "연변동성", "샤프지수", "소르티노지수", "UPI", "UWP(underwaterperiod)"],
+            label: [cagr, mdd, vol, sharpe, sortino, upi, uwp],
         }
     )
     return out
@@ -495,7 +496,7 @@ def merge_metric_tables(left: pd.DataFrame, right: Optional[pd.DataFrame]) -> pd
 
 def style_metric_table(df: pd.DataFrame) -> pd.DataFrame:
     view = df.copy()
-    pct_metrics = {"CAGR", "연변동성", "MDD", "UWP(상승일 비율)"}
+    pct_metrics = {"CAGR", "MDD", "연변동성", "UWP(underwaterperiod)"}
     for col in view.columns[1:]:
         view[col] = [format_pct(v) if metric in pct_metrics else format_num(v) for metric, v in zip(view["지표"], view[col])]
     return view
@@ -745,7 +746,7 @@ def render_help_guide():
 - **소르티노지수**: 하락 변동성만 반영한 위험조정수익률
 - **UPI**: 낙폭의 깊이와 지속기간을 반영한 Ulcer Performance Index 기반 지표
 - **MDD**: 최대낙폭
-- **UWP(상승일 비율)**: 전체 거래일 중 플러스 수익률로 마감한 날의 비중
+- **UWP(underwaterperiod)**: 전체 거래일 중 전고점 아래(DD < 0)에 있었던 날짜 비중입니다
 
 ### 9) 해석할 때 주의할 점
 - 이 대시보드는 **미래 예측기**가 아니라 **과거 패턴 요약기**입니다.
@@ -841,7 +842,7 @@ def render_main_block(
 
     st.markdown("#### 백테스트 결과표")
     st.dataframe(style_metric_table(merged_metric_df), use_container_width=True, hide_index=True)
-    st.caption("UWP는 이 대시보드에서 '상승일 비율'로 계산했습니다. 전체 거래일 중 일간 수익률이 플러스였던 날의 비중입니다.")
+    st.caption("UWP(underwaterperiod)는 전체 거래일 중 전고점 아래(DD < 0)에 있었던 날짜 비중으로 계산합니다. 값이 낮을수록 더 자주 신고가 부근에 머물렀다는 뜻입니다.")
 
     st.markdown("#### MDD 구간별 통계")
     st.dataframe(styled_bucket_table(bucket_df), use_container_width=True, hide_index=True)
@@ -895,7 +896,7 @@ with st.sidebar:
         "- '직접 입력'일 때만 날짜 입력값을 사용합니다.\n"
         "- 한국 6자리 코드는 FDR 우선, 실패 시 Yahoo .KS/.KQ 순으로 조회합니다.\n"
         "- 해외자산이 USD 기준이면 원화 환산 탭을 같이 보여줍니다.\n"
-        "- 벤치마크 비교는 누적수익률 차트와 백테스트 결과표에 함께 반영됩니다."
+        "- 벤치마크 비교는 누적수익률 차트와 백테스트 결과표에 함께 반영됩니다.\n- UWP는 전체 거래일 중 전고점 아래에 있었던 날짜 비중입니다."
     )
 
 
