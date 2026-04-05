@@ -93,6 +93,27 @@ def format_num(v: Optional[float], digits: int = 2) -> str:
 
 
 
+def format_duration_ymd(avg_days: Optional[float]) -> str:
+    if avg_days is None or pd.isna(avg_days):
+        return "-"
+
+    total_days = int(round(float(avg_days)))
+    years = total_days // 365
+    remaining = total_days % 365
+    months = remaining // 30
+    days = remaining % 30
+
+    parts = []
+    if years > 0:
+        parts.append(f"{years}년")
+    if months > 0:
+        parts.append(f"{months}개월")
+    if days > 0 or not parts:
+        parts.append(f"{days}일")
+    return " ".join(parts)
+
+
+
 def bucket_label(threshold: float) -> str:
     if threshold == 0:
         return "0% (ATH)"
@@ -455,6 +476,28 @@ def convert_usd_to_krw(price_usd: pd.Series, usdkrw: pd.Series) -> pd.Series:
 
 
 
+def compute_avg_underwater_period_days(price_df: pd.DataFrame) -> float:
+    dd = price_df["Drawdown"].astype(float)
+    if dd.empty:
+        return np.nan
+
+    periods = []
+    in_underwater = False
+    entry_date = None
+
+    for idx, val in dd.items():
+        if (not in_underwater) and (val < 0):
+            in_underwater = True
+            entry_date = idx
+        elif in_underwater and np.isclose(val, 0.0):
+            periods.append((idx - entry_date).days)
+            in_underwater = False
+            entry_date = None
+
+    return float(np.mean(periods)) if periods else np.nan
+
+
+
 def build_metrics_table(price_df: pd.DataFrame, label: str) -> pd.DataFrame:
     r = price_df["DailyReturn"].dropna().astype(float)
     if r.empty:
@@ -475,7 +518,7 @@ def build_metrics_table(price_df: pd.DataFrame, label: str) -> pd.DataFrame:
     ulcer_index = float(np.sqrt(np.mean(np.square(dd.clip(upper=0)))))
     upi = float(cagr / ulcer_index) if pd.notna(ulcer_index) and not np.isclose(ulcer_index, 0) else np.nan
     mdd = float(dd.min())
-    uwp = float((dd < 0).mean())
+    uwp = compute_avg_underwater_period_days(price_df)
 
     out = pd.DataFrame(
         {
@@ -496,9 +539,19 @@ def merge_metric_tables(left: pd.DataFrame, right: Optional[pd.DataFrame]) -> pd
 
 def style_metric_table(df: pd.DataFrame) -> pd.DataFrame:
     view = df.copy()
-    pct_metrics = {"CAGR", "MDD", "연변동성", "UWP(underwaterperiod)"}
+    pct_metrics = {"CAGR", "MDD", "연변동성"}
+    duration_metrics = {"UWP(underwaterperiod)"}
+
     for col in view.columns[1:]:
-        view[col] = [format_pct(v) if metric in pct_metrics else format_num(v) for metric, v in zip(view["지표"], view[col])]
+        formatted = []
+        for metric, v in zip(view["지표"], view[col]):
+            if metric in pct_metrics:
+                formatted.append(format_pct(v))
+            elif metric in duration_metrics:
+                formatted.append(format_duration_ymd(v))
+            else:
+                formatted.append(format_num(v))
+        view[col] = formatted
     return view
 
 
@@ -746,7 +799,8 @@ def render_help_guide():
 - **소르티노지수**: 하락 변동성만 반영한 위험조정수익률
 - **UPI**: 낙폭의 깊이와 지속기간을 반영한 Ulcer Performance Index 기반 지표
 - **MDD**: 최대낙폭
-- **UWP(underwaterperiod)**: 전체 거래일 중 전고점 아래(DD < 0)에 있었던 날짜 비중입니다
+- **UWP(underwaterperiod)**: 평균 회복기간입니다. 한 번 전고점 아래로 내려간 뒤 다시 전고점을 회복할 때까지 걸린 평균 기간을 뜻합니다.
+  - 이 대시보드에서는 **달력일 기준 평균 기간**을 계산한 뒤, 보기 쉽게 **연·월·일 형태**로 표시합니다.
 
 ### 9) 해석할 때 주의할 점
 - 이 대시보드는 **미래 예측기**가 아니라 **과거 패턴 요약기**입니다.
@@ -842,7 +896,7 @@ def render_main_block(
 
     st.markdown("#### 백테스트 결과표")
     st.dataframe(style_metric_table(merged_metric_df), use_container_width=True, hide_index=True)
-    st.caption("UWP(underwaterperiod)는 전체 거래일 중 전고점 아래(DD < 0)에 있었던 날짜 비중으로 계산합니다. 값이 낮을수록 더 자주 신고가 부근에 머물렀다는 뜻입니다.")
+    st.caption("UWP(underwaterperiod)는 평균 회복기간입니다. 한 번 전고점 아래로 내려간 뒤 다시 전고점을 회복할 때까지의 평균 기간을 달력일 기준으로 계산하고, 보기 쉽게 연·월·일 형태로 표시합니다.")
 
     st.markdown("#### MDD 구간별 통계")
     st.dataframe(styled_bucket_table(bucket_df), use_container_width=True, hide_index=True)
@@ -896,7 +950,7 @@ with st.sidebar:
         "- '직접 입력'일 때만 날짜 입력값을 사용합니다.\n"
         "- 한국 6자리 코드는 FDR 우선, 실패 시 Yahoo .KS/.KQ 순으로 조회합니다.\n"
         "- 해외자산이 USD 기준이면 원화 환산 탭을 같이 보여줍니다.\n"
-        "- 벤치마크 비교는 누적수익률 차트와 백테스트 결과표에 함께 반영됩니다.\n- UWP는 전체 거래일 중 전고점 아래에 있었던 날짜 비중입니다."
+        "- 벤치마크 비교는 누적수익률 차트와 백테스트 결과표에 함께 반영됩니다.\n- UWP는 평균 회복기간(전고점 하회 → 전고점 회복)이며, 달력일 기준 평균을 연·월·일 형태로 보여줍니다."
     )
 
 
