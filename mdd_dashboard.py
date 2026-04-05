@@ -63,8 +63,10 @@ def normalize_input_ticker(raw: str) -> str:
     return alias_map.get(ticker, ticker)
 
 
+
 def is_krx_numeric_ticker(ticker: str) -> bool:
     return bool(re.fullmatch(r"A?\d{6}", ticker))
+
 
 
 def parse_optional_date(text: str) -> Optional[pd.Timestamp]:
@@ -252,16 +254,6 @@ def restrict_date_range(
 
 
 
-def build_price_frame(price: pd.Series) -> pd.DataFrame:
-    df = pd.DataFrame({"Close": price.dropna().astype(float)})
-    df["High"] = df["Close"].cummax()
-    df["Drawdown"] = df["Close"] / df["High"] - 1.0
-    df["CumReturn"] = df["Close"] / df["Close"].iloc[0] - 1.0
-    df["DaysToNextATH"] = days_to_next_ath(df["Drawdown"])
-    return df
-
-
-
 def days_to_next_ath(dd: pd.Series) -> pd.Series:
     """각 시점에서 다음 전고점(DD=0) 회복까지 남은 거래일 수를 계산한다."""
     dd_values = dd.to_numpy()
@@ -281,6 +273,16 @@ def days_to_next_ath(dd: pd.Series) -> pd.Series:
         else:
             out[i] = float(next_zero_idx[i] - i)
     return pd.Series(out, index=dd.index, name="DaysToNextATH")
+
+
+
+def build_price_frame(price: pd.Series) -> pd.DataFrame:
+    df = pd.DataFrame({"Close": price.dropna().astype(float)})
+    df["High"] = df["Close"].cummax()
+    df["Drawdown"] = df["Close"] / df["High"] - 1.0
+    df["CumReturn"] = df["Close"] / df["Close"].iloc[0] - 1.0
+    df["DaysToNextATH"] = days_to_next_ath(df["Drawdown"])
+    return df
 
 
 
@@ -339,7 +341,7 @@ def build_bucket_table(df: pd.DataFrame, thresholds: List[float]) -> pd.DataFram
         prev_cum = cum_ratio
 
     # 구간 진입/회복 통계: 각 구간으로 "처음 들어간" 사건 기준
-    entry_counts, recovered_counts, recovery_probs, avg_recovery_days = compute_segment_recovery_stats(dd, thresholds)
+    entry_counts, recovered_counts, avg_recovery_days = compute_segment_recovery_stats(dd, thresholds)
 
     out = pd.DataFrame(
         {
@@ -350,8 +352,7 @@ def build_bucket_table(df: pd.DataFrame, thresholds: List[float]) -> pd.DataFram
             "구간 비중": segment_weights,
             "진입사건": entry_counts,
             "이후 회복": recovered_counts,
-            "회복확률": recovery_probs,
-            "평균 거래일수": avg_recovery_days,
+            "평균 회복일수(구간 진입→전고점 회복)": avg_recovery_days,
         }
     )
     return out
@@ -367,7 +368,7 @@ def compute_segment_recovery_stats(dd: pd.Series, thresholds: List[float]):
     - -10% 행: -5% ~ -10% 구간으로 더 깊게 내려온 사건 수
 
     이후 회복은 해당 진입 시점 이후 DD가 0으로 회복한 경우를 센다.
-    평균 거래일수는 회복한 케이스만 평균낸다.
+    평균 회복일수는 회복한 케이스만 평균낸다.
     """
     values = dd.to_numpy(dtype=float)
     n = len(values)
@@ -410,17 +411,12 @@ def compute_segment_recovery_stats(dd: pd.Series, thresholds: List[float]):
 
         prev_seg = cur_seg
 
-    recovery_probs = []
     avg_recovery_days = []
     for i in range(len(thresholds)):
-        entry = entry_counts[i]
-        recovered = recovered_counts[i]
-        prob = np.nan if entry == 0 else recovered / entry
         avg_days = np.nan if len(recovery_days_store[i]) == 0 else float(np.mean(recovery_days_store[i]))
-        recovery_probs.append(prob)
         avg_recovery_days.append(avg_days)
 
-    return entry_counts, recovered_counts, recovery_probs, avg_recovery_days
+    return entry_counts, recovered_counts, avg_recovery_days
 
 
 
@@ -498,12 +494,65 @@ def bucket_bar_chart(bucket_df: pd.DataFrame, title: str):
 def styled_bucket_table(bucket_df: pd.DataFrame) -> pd.DataFrame:
     view = bucket_df.copy()
     view["MDD"] = view["MDD"].map(lambda x: f"{x:.0%}")
-    for col in ["누적 비율", "구간 비중", "회복확률"]:
+    for col in ["누적 비율", "구간 비중"]:
         view[col] = view[col].map(lambda x: "-" if pd.isna(x) else f"{x:.1%}")
     for col in ["조건일", "개장일", "진입사건", "이후 회복"]:
         view[col] = view[col].map(lambda x: f"{int(x):,}" if pd.notna(x) else "-")
-    view["평균 거래일수"] = view["평균 거래일수"].map(lambda x: "-" if pd.isna(x) else f"{x:,.1f}")
+    avg_col = "평균 회복일수(구간 진입→전고점 회복)"
+    view[avg_col] = view[avg_col].map(lambda x: "-" if pd.isna(x) else f"{x:,.1f}")
     return view
+
+
+
+def render_help_guide():
+    with st.expander("📘 이 대시보드는 이렇게 해석하세요", expanded=False):
+        st.markdown(
+            """
+### 1) 위쪽 핵심 지표
+- **현재가**: 마지막 거래일 종가입니다.
+- **과거 최고가**: 조회 기간 내에서 가장 높았던 가격입니다.
+- **고점대비 하락률**: 지금 가격이 과거 최고가 대비 얼마나 내려와 있는지 보여줍니다.
+  - 예: `-12%`면 최고점보다 12% 낮은 상태입니다.
+- **MDD**: 조회 기간 중 가장 깊었던 낙폭입니다.
+  - 예: `-35%`면 과거 어느 시점엔 최고점 대비 35%까지 빠진 적이 있었다는 뜻입니다.
+- **MAX 하락일**: 그 최대 낙폭이 발생한 날짜입니다.
+- **평균 고점대비 하락률**: 전체 기간 동안 평균적으로 얼마나 물려 있었는지 보는 보조지표입니다.
+
+### 2) 기준 가격
+- **기준 10%, 20%, 30%**는 과거 최고가 기준으로 각각 10%, 20%, 30% 하락한 가격입니다.
+- 내가 생각하는 매수 기준선이나 물타기 기준선을 숫자로 확인할 때 유용합니다.
+
+### 3) MDD 차트
+- 세로축이 **고점 대비 하락률**입니다.
+- 아래로 깊게 내려갈수록 낙폭이 큰 구간입니다.
+- 특정 종목이 얼마나 자주, 얼마나 오래 깊은 하락 구간에 있었는지 감으로 파악할 수 있습니다.
+
+### 4) MDD 구간 비중 차트
+- 각 구간에서 실제로 머문 비중을 보여줍니다.
+- 예를 들어 `-10%~-15%` 구간 비중이 높다면, 그 종목은 생각보다 그 근처에서 오래 머무는 편이라고 해석할 수 있습니다.
+
+### 5) MDD 구간별 통계표
+- **누적 비율**: 해당 기준 이내에서 있었던 비중입니다.
+  - 예: `-20%` 행의 누적 비율이 `82%`라면, 전체 거래일의 82%는 고점 대비 -20% 이내에 있었다는 뜻입니다.
+- **조건일**: 그 누적 비율을 실제 날짜 수로 바꾼 값입니다.
+- **개장일**: 조회 기간 전체 거래일 수입니다.
+- **구간 비중**: 바로 위 구간과 현재 구간 사이에 실제 머문 비중입니다.
+  - 예: `-10%` 행의 구간 비중은 대체로 `-5%~-10%` 구간에 머문 비중으로 보면 됩니다.
+- **진입사건**: 더 깊은 하락 구간으로 "처음 들어간" 횟수입니다.
+  - 예: `-20%` 행의 진입사건이 4면, 과거에 -20% 이하 구간으로 새롭게 내려간 흐름이 4번 있었다는 뜻입니다.
+- **이후 회복**: 그 진입사건들 중 나중에 전고점을 다시 회복한 건수입니다.
+- **평균 회복일수(구간 진입→전고점 회복)**:
+  해당 구간에 **처음 진입한 날부터**, 다음 전고점을 다시 뚫을 때까지 걸린 평균 거래일수입니다.
+  - 이 값은 **저점에서 회복까지**가 아니라 **구간 진입 시점에서 회복까지**입니다.
+  - 아직 회복하지 못한 최근 사건은 평균 계산에서 제외됩니다.
+
+### 6) 해석할 때 주의할 점
+- 이 표는 **미래 예측표**가 아니라 **과거 패턴 요약표**입니다.
+- MDD가 작다고 앞으로도 안전하다는 뜻은 아닙니다.
+- 최근 몇 년만 보면 낙폭이 작게 보일 수 있고, 장기 전체를 보면 전혀 다르게 보일 수 있습니다.
+- 그래서 가능하면 **전체 기간 / 최근 10년 / 최근 5년**처럼 기간을 바꿔가며 같이 보는 것이 좋습니다.
+            """
+        )
 
 
 # -----------------------------
@@ -525,6 +574,8 @@ with st.sidebar:
         "- 해외자산이 USD 기준이면 원화 환산 탭을 같이 보여줍니다."
     )
 
+
+render_help_guide()
 
 if run:
     try:
