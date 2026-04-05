@@ -26,7 +26,7 @@ st.set_page_config(
 
 st.title("📉 MDD 계산기 대시보드")
 st.caption(
-    "최대낙폭(MDD) 분석, 누적수익률, 낙폭 사건 로그, 벤치마크 비교, 백테스트 요약표까지 한 번에 보는 대시보드입니다."
+    "최대낙폭(MDD) 분석, 누적수익률, 낙폭 사건 로그, 벤치마크 비교, 백테스트 요약표까지 한 번에 보는 대시보드드입니다."
 )
 
 TRADING_DAYS = 252
@@ -476,12 +476,12 @@ def convert_usd_to_krw(price_usd: pd.Series, usdkrw: pd.Series) -> pd.Series:
 
 
 
-def compute_avg_underwater_period_days(price_df: pd.DataFrame) -> float:
+def compute_underwater_period_stats(price_df: pd.DataFrame) -> Dict[str, float]:
     dd = price_df["Drawdown"].astype(float)
     if dd.empty:
-        return np.nan
+        return {"min_days": np.nan, "avg_days": np.nan, "max_days": np.nan, "count": 0}
 
-    periods = []
+    periods: List[int] = []
     in_underwater = False
     entry_date = None
 
@@ -490,11 +490,19 @@ def compute_avg_underwater_period_days(price_df: pd.DataFrame) -> float:
             in_underwater = True
             entry_date = idx
         elif in_underwater and np.isclose(val, 0.0):
-            periods.append((idx - entry_date).days)
+            periods.append(int((idx - entry_date).days))
             in_underwater = False
             entry_date = None
 
-    return float(np.mean(periods)) if periods else np.nan
+    if not periods:
+        return {"min_days": np.nan, "avg_days": np.nan, "max_days": np.nan, "count": 0}
+
+    return {
+        "min_days": float(np.min(periods)),
+        "avg_days": float(np.mean(periods)),
+        "max_days": float(np.max(periods)),
+        "count": len(periods),
+    }
 
 
 
@@ -518,12 +526,32 @@ def build_metrics_table(price_df: pd.DataFrame, label: str) -> pd.DataFrame:
     ulcer_index = float(np.sqrt(np.mean(np.square(dd.clip(upper=0)))))
     upi = float(cagr / ulcer_index) if pd.notna(ulcer_index) and not np.isclose(ulcer_index, 0) else np.nan
     mdd = float(dd.min())
-    uwp = compute_avg_underwater_period_days(price_df)
+    uwp_stats = compute_underwater_period_stats(price_df)
 
     out = pd.DataFrame(
         {
-            "지표": ["CAGR", "MDD", "연변동성", "샤프지수", "소르티노지수", "UPI", "UWP(underwaterperiod)"],
-            label: [cagr, mdd, vol, sharpe, sortino, upi, uwp],
+            "지표": [
+                "CAGR",
+                "MDD",
+                "연변동성",
+                "샤프지수",
+                "소르티노지수",
+                "UPI",
+                "UWP(최소 회복기간)",
+                "UWP(평균 회복기간)",
+                "UWP(최장 회복기간)",
+            ],
+            label: [
+                cagr,
+                mdd,
+                vol,
+                sharpe,
+                sortino,
+                upi,
+                uwp_stats["min_days"],
+                uwp_stats["avg_days"],
+                uwp_stats["max_days"],
+            ],
         }
     )
     return out
@@ -540,7 +568,7 @@ def merge_metric_tables(left: pd.DataFrame, right: Optional[pd.DataFrame]) -> pd
 def style_metric_table(df: pd.DataFrame) -> pd.DataFrame:
     view = df.copy()
     pct_metrics = {"CAGR", "MDD", "연변동성"}
-    duration_metrics = {"UWP(underwaterperiod)"}
+    duration_metrics = {"UWP(최소 회복기간)", "UWP(평균 회복기간)", "UWP(최장 회복기간)"}
 
     for col in view.columns[1:]:
         formatted = []
@@ -799,8 +827,9 @@ def render_help_guide():
 - **소르티노지수**: 하락 변동성만 반영한 위험조정수익률
 - **UPI**: 낙폭의 깊이와 지속기간을 반영한 Ulcer Performance Index 기반 지표
 - **MDD**: 최대낙폭
-- **UWP(underwaterperiod)**: 평균 회복기간입니다. 한 번 전고점 아래로 내려간 뒤 다시 전고점을 회복할 때까지 걸린 평균 기간을 뜻합니다.
-  - 이 대시보드에서는 **달력일 기준 평균 기간**을 계산한 뒤, 보기 쉽게 **연·월·일 형태**로 표시합니다.
+- **UWP(최소/평균/최장 회복기간)**: 전고점 아래로 내려간 뒤 다시 전고점을 회복하기까지 걸린 기간을 최소·평균·최장으로 나눠 보여줍니다.
+  - **평균만 보면 놓치기 쉬운 극단값**을 같이 보려는 목적입니다.
+  - 이 대시보드에서는 **달력일 기준 회복기간**을 계산한 뒤, 보기 쉽게 **연·월·일 형태**로 표시합니다.
 
 ### 9) 해석할 때 주의할 점
 - 이 대시보드는 **미래 예측기**가 아니라 **과거 패턴 요약기**입니다.
@@ -896,7 +925,7 @@ def render_main_block(
 
     st.markdown("#### 백테스트 결과표")
     st.dataframe(style_metric_table(merged_metric_df), use_container_width=True, hide_index=True)
-    st.caption("UWP(underwaterperiod)는 평균 회복기간입니다. 한 번 전고점 아래로 내려간 뒤 다시 전고점을 회복할 때까지의 평균 기간을 달력일 기준으로 계산하고, 보기 쉽게 연·월·일 형태로 표시합니다.")
+    st.caption("UWP는 전고점 하회 이후 다시 전고점을 회복하기까지 걸린 기간입니다. 이 표에서는 최소·평균·최장 회복기간을 함께 보여줘서 평균의 함정에 빠지지 않도록 했고, 달력일 기준 값을 연·월·일 형태로 표시합니다.")
 
     st.markdown("#### MDD 구간별 통계")
     st.dataframe(styled_bucket_table(bucket_df), use_container_width=True, hide_index=True)
@@ -950,7 +979,7 @@ with st.sidebar:
         "- '직접 입력'일 때만 날짜 입력값을 사용합니다.\n"
         "- 한국 6자리 코드는 FDR 우선, 실패 시 Yahoo .KS/.KQ 순으로 조회합니다.\n"
         "- 해외자산이 USD 기준이면 원화 환산 탭을 같이 보여줍니다.\n"
-        "- 벤치마크 비교는 누적수익률 차트와 백테스트 결과표에 함께 반영됩니다.\n- UWP는 평균 회복기간(전고점 하회 → 전고점 회복)이며, 달력일 기준 평균을 연·월·일 형태로 보여줍니다."
+        "- 벤치마크 비교는 누적수익률 차트와 백테스트 결과표에 함께 반영됩니다.\n- UWP는 전고점 하회 → 전고점 회복까지 걸린 기간이며, 최소·평균·최장 회복기간을 달력일 기준으로 연·월·일 형태로 보여줍니다."
     )
 
 
