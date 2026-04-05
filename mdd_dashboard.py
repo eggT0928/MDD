@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass
+from io import StringIO
 from typing import Optional, Tuple, Dict, List
 
 import numpy as np
@@ -8,6 +9,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
+import requests
 
 try:
     import FinanceDataReader as fdr
@@ -26,7 +28,7 @@ st.set_page_config(
 
 st.title("📉 MDD 계산기 대시보드")
 st.caption(
-    "최대낙폭(MDD) 분석, 누적수익률, 낙폭 사건 로그, 벤치마크 비교, 백테스트 요약표까지 한 번에 보는 대시보드드입니다."
+    "최대낙폭(MDD) 분석, 누적수익률, 낙폭 사건 로그, 벤치마크 비교, 백테스트 요약표까지 한 번에 보는 Streamlit 버전입니다."
 )
 
 TRADING_DAYS = 252
@@ -230,29 +232,82 @@ def fetch_price_data(user_ticker: str) -> PriceBundle:
     raise RuntimeError("\n".join(errors))
 
 
+def _clean_price_like_series(s: pd.Series) -> pd.Series:
+    s = s.copy()
+    s.index = pd.to_datetime(s.index).tz_localize(None)
+    s = pd.to_numeric(s, errors="coerce")
+    s = s.dropna().sort_index().astype(float)
+    s = s[~s.index.duplicated(keep="last")]
+    return s
+
+
+@st.cache_data(show_spinner=False)
+def fetch_fred_daily_usdkrw_series() -> pd.Series:
+    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DEXKOUS"
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
+    df = pd.read_csv(StringIO(resp.text))
+    if df.empty or "DATE" not in df.columns or "DEXKOUS" not in df.columns:
+        raise ValueError("FRED DEXKOUS 응답 형식이 예상과 다릅니다.")
+
+    s = pd.Series(df["DEXKOUS"].values, index=pd.to_datetime(df["DATE"]), name="USDKRW_FRED")
+    s = pd.to_numeric(s, errors="coerce")
+    s = s.dropna().sort_index().astype(float)
+    s = s[~s.index.duplicated(keep="last")]
+    if s.empty:
+        raise ValueError("FRED DEXKOUS에서 유효한 환율 데이터를 찾지 못했습니다.")
+    return s
+
+
 @st.cache_data(show_spinner=False)
 def fetch_usdkrw_series() -> pd.Series:
     errors = []
+    sources: Dict[str, pd.Series] = {}
 
     if fdr is not None:
         try:
             fx = fdr.DataReader("USD/KRW")
             if fx is not None and not fx.empty:
                 close_col = "Close" if "Close" in fx.columns else fx.columns[0]
-                s = fx[close_col].copy()
-                s.index = pd.to_datetime(s.index).tz_localize(None)
-                s = s.dropna().sort_index().astype(float)
+                s = _clean_price_like_series(fx[close_col])
                 if not s.empty:
-                    return s
+                    sources["FinanceDataReader"] = s
         except Exception as e:
             errors.append(f"FDR USD/KRW: {e}")
 
     try:
-        return fetch_with_yfinance("KRW=X").series
+        y_s = _clean_price_like_series(fetch_with_yfinance("KRW=X").series)
+        if not y_s.empty:
+            sources["Yahoo Finance"] = y_s
     except Exception as e:
         errors.append(f"Yahoo KRW=X: {e}")
 
-    raise RuntimeError(" | ".join(errors))
+    try:
+        fred_s = fetch_fred_daily_usdkrw_series()
+        if not fred_s.empty:
+            sources["FRED DEXKOUS"] = fred_s
+    except Exception as e:
+        errors.append(f"FRED DEXKOUS: {e}")
+
+    if not sources:
+        raise RuntimeError(" | ".join(errors))
+
+    merged = None
+    merge_order = ["FRED DEXKOUS", "Yahoo Finance", "FinanceDataReader"]
+    used_sources = []
+    for name in merge_order:
+        s = sources.get(name)
+        if s is None or s.empty:
+            continue
+        if merged is None:
+            merged = s.copy()
+        else:
+            merged = s.combine_first(merged)
+        used_sources.append(name)
+
+    merged = _clean_price_like_series(merged)
+    merged.attrs["source_note"] = " + ".join(used_sources)
+    return merged
 
 
 # -----------------------------
@@ -1055,6 +1110,10 @@ if run:
             with tab_objs[1]:
                 with st.spinner("USD/KRW 환율을 불러오는 중입니다..."):
                     usdkrw_full = fetch_usdkrw_series()
+
+                fx_source_note = usdkrw_full.attrs.get("source_note")
+                if fx_source_note:
+                    st.caption(f"환율 소스: {fx_source_note} (겹치는 날짜는 앞쪽 소스를 우선 사용)")
 
                 fx_start = usdkrw_full.index.min().normalize()
                 fx_end = usdkrw_full.index.max().normalize()
