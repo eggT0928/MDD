@@ -244,10 +244,10 @@ def _clean_price_like_series(s: pd.Series) -> pd.Series:
 @st.cache_data(show_spinner=False)
 def fetch_fred_daily_usdkrw_series() -> pd.Series:
     """
-    FRED DEXKOUS 일간 USD/KRW 환율 로드
-    - 1차: fredgraph csv
-    - 2차: /data/DEXKOUS 텍스트 테이블
-    - DATE VALUE / DATE,DEXKOUS / DATE,VALUE 등 다양한 형식 허용
+    FRED DEXKOUS 일간 USD/KRW 환율 로드.
+    - 1차: fredgraph.csv
+    - 2차: /data/DEXKOUS 테이블 텍스트
+    두 형식을 모두 유연하게 파싱한다.
     """
     urls = [
         "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DEXKOUS",
@@ -264,21 +264,19 @@ def fetch_fred_daily_usdkrw_series() -> pd.Series:
         try:
             resp = requests.get(url, timeout=20, headers=headers)
             resp.raise_for_status()
-
             text = resp.text.replace("\ufeff", "").strip()
             if not text:
                 raise ValueError("빈 응답입니다.")
 
             records = []
 
-            # 1) 줄 단위 파싱: DATE VALUE / DATE,VALUE / DATE DEXKOUS 모두 허용
+            # 1) 라인 단위 직접 파싱 (DATE VALUE, DATE,VALUE 모두 허용)
             for raw_line in text.splitlines():
                 line = raw_line.strip()
                 if not line:
                     continue
-
                 upper_line = line.upper()
-                if upper_line.startswith("DATE ") or upper_line == "DATE VALUE":
+                if upper_line in {"DATE VALUE", "DATE,VALUE", "DATE,DEXKOUS"}:
                     continue
                 if line.startswith("#"):
                     continue
@@ -287,11 +285,9 @@ def fetch_fred_daily_usdkrw_series() -> pd.Series:
                 if not m:
                     continue
 
-                dt = m.group(1)
-                val = m.group(2)
+                dt, val = m.group(1), m.group(2)
                 if val == ".":
                     continue
-
                 records.append((dt, float(val)))
 
             # 2) pandas csv 파싱 fallback
@@ -299,32 +295,41 @@ def fetch_fred_daily_usdkrw_series() -> pd.Series:
                 try:
                     df_try = pd.read_csv(StringIO(text))
                     df_try.columns = [str(c).strip() for c in df_try.columns]
-
                     date_col = None
                     value_col = None
                     for c in df_try.columns:
-                        c_upper = c.upper()
-                        if c_upper == "DATE":
+                        cu = c.upper()
+                        if cu == "DATE":
                             date_col = c
-                        elif c_upper in ("VALUE", "DEXKOUS"):
+                        elif cu in ("VALUE", "DEXKOUS"):
                             value_col = c
-
                     if date_col is not None and value_col is not None:
                         tmp = df_try[[date_col, value_col]].copy()
                         tmp[date_col] = pd.to_datetime(tmp[date_col], errors="coerce")
                         tmp[value_col] = pd.to_numeric(tmp[value_col], errors="coerce")
                         tmp = tmp.dropna()
-                        records = list(
-                            zip(
-                                tmp[date_col].dt.strftime("%Y-%m-%d"),
-                                tmp[value_col].astype(float),
-                            )
-                        )
+                        records = list(zip(tmp[date_col].dt.strftime("%Y-%m-%d"), tmp[value_col].astype(float)))
+                except Exception:
+                    pass
+
+            # 3) /data/DEXKOUS 테이블 텍스트용 공백 구분 파싱 fallback
+            if not records:
+                try:
+                    df_try = pd.read_csv(StringIO(text), sep=r"\s+", engine="python")
+                    df_try.columns = [str(c).strip().upper() for c in df_try.columns]
+                    if "DATE" in df_try.columns:
+                        value_col = "VALUE" if "VALUE" in df_try.columns else ("DEXKOUS" if "DEXKOUS" in df_try.columns else None)
+                        if value_col is not None:
+                            tmp = df_try[["DATE", value_col]].copy()
+                            tmp["DATE"] = pd.to_datetime(tmp["DATE"], errors="coerce")
+                            tmp[value_col] = pd.to_numeric(tmp[value_col], errors="coerce")
+                            tmp = tmp.dropna()
+                            records = list(zip(tmp["DATE"].dt.strftime("%Y-%m-%d"), tmp[value_col].astype(float)))
                 except Exception:
                     pass
 
             if not records:
-                raise ValueError("FRED 응답 형식을 파싱하지 못했습니다.")
+                raise ValueError("FRED 응답을 파싱하지 못했습니다.")
 
             df = pd.DataFrame(records, columns=["Date", "USDKRW"])
             df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
@@ -332,16 +337,14 @@ def fetch_fred_daily_usdkrw_series() -> pd.Series:
             df = df.dropna().drop_duplicates(subset=["Date"]).sort_values("Date")
             s = df.set_index("Date")["USDKRW"].astype(float)
             s = s[~s.index.duplicated(keep="last")]
-
             if s.empty:
                 raise ValueError("파싱 후 데이터가 비어 있습니다.")
-
             return s
 
         except Exception as e:
             last_error = f"{url} -> {e}"
 
-    raise ValueError(last_error or "FRED DEXKOUS 데이터를 불러오지 못했습니다.")
+    raise ValueError(last_error or "FRED DEXKOUS 로딩 실패")
 
 
 @st.cache_data(show_spinner=False)
@@ -837,8 +840,7 @@ def style_event_log(df: pd.DataFrame, currency: str) -> pd.DataFrame:
         view[col] = view[col].map(lambda x: "-" if pd.isna(x) else format_price(float(x), currency))
     for col in ["회복 거래일수", "회복 달력일수"]:
         view[col] = view[col].map(lambda x: "-" if pd.isna(x) else f"{int(x):,}")
-    return view
-
+    return view.astype(str)
 
 
 def align_for_compare(main_df: pd.DataFrame, bench_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -941,6 +943,37 @@ def styled_bucket_table(bucket_df: pd.DataFrame) -> pd.DataFrame:
 
 
 
+def compare_drawdown_chart(main_df: pd.DataFrame, main_label: str, benchmark_df: pd.DataFrame, benchmark_label: str, title: str):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=main_df.index, y=main_df["Drawdown"] * 100, mode="lines", name=main_label, line=dict(width=2.0), fill="tozeroy"))
+    fig.add_trace(go.Scatter(x=benchmark_df.index, y=benchmark_df["Drawdown"] * 100, mode="lines", name=benchmark_label, line=dict(width=1.8, dash="dash")))
+    fig.update_layout(
+        title=title,
+        height=420,
+        margin=dict(l=20, r=20, t=60, b=20),
+        yaxis_title="고점대비 하락률 (%)",
+        xaxis_title="날짜",
+        hovermode="x unified",
+    )
+    fig.update_yaxes(ticksuffix="%")
+    return fig
+
+
+def relative_strength_chart(main_df: pd.DataFrame, main_label: str, benchmark_df: pd.DataFrame, benchmark_label: str, title: str):
+    rel = (main_df["Indexed100"] / benchmark_df["Indexed100"]) * 100
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=rel.index, y=rel, mode="lines", name=f"{main_label} / {benchmark_label}", line=dict(width=2.0)))
+    fig.update_layout(
+        title=title,
+        height=380,
+        margin=dict(l=20, r=20, t=60, b=20),
+        yaxis_title="상대 강도 (비교시작=100)",
+        xaxis_title="날짜",
+        hovermode="x unified",
+    )
+    return fig
+
+
 def render_help_guide():
     with st.expander("📘 이 대시보드는 이렇게 해석하세요", expanded=False):
         st.markdown(
@@ -967,7 +1000,7 @@ def render_help_guide():
 ### 4) 누적 수익률 차트 (시작점 100)
 - 시작일을 100으로 맞춘 차트입니다.
 - 가격 수준이 달라도, 같은 기간에 **누가 더 잘 버텼고 더 많이 올랐는지** 직관적으로 보기 좋습니다.
-- 벤치마크를 넣으면 둘을 같은 출발선에서 비교합니다.
+- 벤치마크를 넣으면 화면이 **1) 분석 대상 종목 2) 벤치마크 종목 3) 분석 대상 vs 벤치마크** 순서로 나뉘어 보입니다.
 
 ### 5) 벤치마크 비교
 - 기준 종목과 비교 대상을 같은 기간의 공통 날짜로 맞춘 뒤 성과를 비교합니다.
@@ -1027,31 +1060,18 @@ def render_price_threshold_cards(stats: Dict[str, object], currency: str):
 
 
 
-def render_main_block(
+def render_asset_section(
     df: pd.DataFrame,
     stats: Dict[str, object],
     bundle: PriceBundle,
     thresholds: List[float],
-    benchmark_bundle: Optional[PriceBundle],
-    benchmark_df: Optional[pd.DataFrame],
     event_threshold: float,
     section_prefix: str,
 ):
     bucket_df = build_bucket_table(df, thresholds)
     metric_df = build_metrics_table(df, bundle.display_name)
 
-    aligned_main = None
-    aligned_bench = None
-    merged_metric_df = metric_df
-    if benchmark_bundle is not None and benchmark_df is not None:
-        try:
-            aligned_main, aligned_bench = align_for_compare(df, benchmark_df)
-            bench_metric_df = build_metrics_table(aligned_bench, benchmark_bundle.display_name)
-            main_metric_aligned = build_metrics_table(aligned_main, bundle.display_name)
-            merged_metric_df = merge_metric_tables(main_metric_aligned, bench_metric_df)
-        except Exception as e:
-            st.warning(f"벤치마크 비교를 건너뛰었습니다: {e}")
-            aligned_main, aligned_bench = None, None
+    st.markdown(f"### {section_prefix}")
 
     mc1, mc2, mc3, mc4, mc5, mc6, mc7 = st.columns(7)
     mc1.metric("현재가", format_price(stats["current_price"], bundle.currency))
@@ -1067,57 +1087,94 @@ def render_main_block(
 
     left, right = st.columns([2, 1])
     with left:
-        st.plotly_chart(drawdown_chart(df, f"{section_prefix}MDD 차트"), width="stretch")
+        st.plotly_chart(drawdown_chart(df, f"{section_prefix} · MDD 차트"), width="stretch")
     with right:
-        st.plotly_chart(bucket_bar_chart(bucket_df, f"{section_prefix}MDD 구간 비중"), width="stretch")
+        st.plotly_chart(bucket_bar_chart(bucket_df, f"{section_prefix} · MDD 구간 비중"), width="stretch")
 
-    st.plotly_chart(price_and_high_chart(df, f"{section_prefix}현재가 vs 과거 최고가"), width="stretch")
+    st.plotly_chart(price_and_high_chart(df, f"{section_prefix} · 현재가 vs 과거 최고가"), width="stretch")
+    st.plotly_chart(indexed_return_chart(df, bundle.display_name, title=f"{section_prefix} · 누적 수익률 차트 (시작점 100)"), width="stretch")
 
-    if aligned_main is not None and aligned_bench is not None and benchmark_bundle is not None:
-        st.plotly_chart(
-            indexed_return_chart(
-                aligned_main,
-                bundle.display_name,
-                aligned_bench,
-                benchmark_bundle.display_name,
-                title=f"{section_prefix}누적 수익률 차트 (시작점 100, 벤치마크 포함)",
-            ),
-            width="stretch",
-        )
-    else:
-        st.plotly_chart(
-            indexed_return_chart(df, bundle.display_name, title=f"{section_prefix}누적 수익률 차트 (시작점 100)"),
-            width="stretch",
-        )
-
-    st.markdown("#### 백테스트 결과표")
-    st.dataframe(style_metric_table(merged_metric_df), width="stretch", hide_index=True)
+    st.markdown(f"#### {section_prefix} · 백테스트 결과표")
+    st.dataframe(style_metric_table(metric_df).astype(str), width="stretch", hide_index=True)
     st.caption("UWP는 전고점 하회 이후 다시 전고점을 회복하기까지 걸린 기간입니다. 이 표에서는 최소·평균·최장 회복기간을 함께 보여줘서 평균의 함정에 빠지지 않도록 했고, 달력일 기준 값을 연·월·일 형태로 표시합니다.")
 
-    st.markdown("#### MDD 구간별 통계")
-    st.dataframe(styled_bucket_table(bucket_df), width="stretch", hide_index=True)
+    st.markdown(f"#### {section_prefix} · MDD 구간별 통계")
+    st.dataframe(styled_bucket_table(bucket_df).astype(str), width="stretch", hide_index=True)
 
-    st.markdown("#### 낙폭 사건 로그")
+    st.markdown(f"#### {section_prefix} · 낙폭 사건 로그")
     event_log = detect_drawdown_events(df, threshold=event_threshold)
     if event_log.empty:
         st.info(f"선택한 기간에는 {event_threshold:.0%} 이하로 내려간 사건이 없습니다.")
     else:
-        st.dataframe(style_event_log(event_log, bundle.currency), width="stretch", hide_index=True)
-        st.caption(
-            f"사건 로그는 낙폭이 처음 {event_threshold:.0%} 이하로 진입한 시점부터, 다시 전고점을 회복할 때까지를 한 사건으로 묶어 보여줍니다."
-        )
+        styled_log = style_event_log(event_log, bundle.currency)
+        st.dataframe(styled_log.astype(str), width="stretch", hide_index=True)
+        st.caption(f"사건 로그는 낙폭이 처음 {event_threshold:.0%} 이하로 진입한 시점부터, 다시 전고점을 회복할 때까지를 한 사건으로 묶어 보여줍니다.")
 
-    with st.expander("원시 데이터 보기"):
+    with st.expander(f"{section_prefix} 원시 데이터 보기"):
         raw_view = df.copy().reset_index().rename(columns={"index": "Date"})
         raw_view["Date"] = raw_view["Date"].dt.date.astype(str)
-        st.dataframe(raw_view, width="stretch", hide_index=True)
+        st.dataframe(raw_view.astype(str), width="stretch", hide_index=True)
         csv = raw_view.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
-            f"{section_prefix}CSV 다운로드",
+            f"{section_prefix} CSV 다운로드",
             csv,
             file_name=f"{section_prefix.replace(' ', '_').lower()}mdd_raw_data.csv",
             mime="text/csv",
         )
+
+
+def render_compare_section(
+    main_df: pd.DataFrame,
+    main_bundle: PriceBundle,
+    benchmark_df: pd.DataFrame,
+    benchmark_bundle: PriceBundle,
+    section_prefix: str,
+):
+    aligned_main, aligned_bench = align_for_compare(main_df, benchmark_df)
+    compare_metric_df = merge_metric_tables(
+        build_metrics_table(aligned_main, main_bundle.display_name),
+        build_metrics_table(aligned_bench, benchmark_bundle.display_name),
+    )
+
+    st.markdown(f"### {section_prefix}")
+    st.caption("비교 섹션은 두 종목의 공통 날짜만 남겨 같은 출발선에서 비교합니다.")
+    st.plotly_chart(
+        indexed_return_chart(
+            aligned_main,
+            main_bundle.display_name,
+            aligned_bench,
+            benchmark_bundle.display_name,
+            title=f"{section_prefix} · 누적 수익률 비교 (시작점 100)",
+        ),
+        width="stretch",
+    )
+
+    left, right = st.columns(2)
+    with left:
+        st.plotly_chart(
+            compare_drawdown_chart(
+                aligned_main,
+                main_bundle.display_name,
+                aligned_bench,
+                benchmark_bundle.display_name,
+                title=f"{section_prefix} · 낙폭 비교",
+            ),
+            width="stretch",
+        )
+    with right:
+        st.plotly_chart(
+            relative_strength_chart(
+                aligned_main,
+                main_bundle.display_name,
+                aligned_bench,
+                benchmark_bundle.display_name,
+                title=f"{section_prefix} · 상대 강도 (분석대상/벤치마크)",
+            ),
+            width="stretch",
+        )
+
+    st.markdown(f"#### {section_prefix} · 백테스트 비교표")
+    st.dataframe(style_metric_table(compare_metric_df).astype(str), width="stretch", hide_index=True)
 
 
 # -----------------------------
@@ -1193,6 +1250,7 @@ if run:
         st.caption(
             f"사용된 심볼: `{bundle.symbol_used}` · 전체 가능 기간: {bundle.series.index.min().date()} ~ {bundle.series.index.max().date()}"
         )
+        st.caption("가격 데이터는 수정종가 기준으로 계산합니다. Yahoo Finance는 auto_adjust=True로 받아 배당·분할 영향을 반영합니다.")
         if benchmark_bundle is not None:
             st.caption(
                 f"벤치마크: `{benchmark_bundle.symbol_used}` · {benchmark_bundle.display_name} · 전체 가능 기간: {benchmark_bundle.series.index.min().date()} ~ {benchmark_bundle.series.index.max().date()}"
@@ -1207,16 +1265,33 @@ if run:
         event_threshold = event_threshold_pct / 100.0
 
         with tab_objs[0]:
-            render_main_block(
+            render_asset_section(
                 df=base_df,
                 stats=base_stats,
                 bundle=bundle,
                 thresholds=thresholds,
-                benchmark_bundle=benchmark_bundle,
-                benchmark_df=benchmark_df,
                 event_threshold=event_threshold,
-                section_prefix="",
+                section_prefix="1. 분석 대상 종목",
             )
+            if benchmark_bundle is not None and benchmark_df is not None:
+                render_asset_section(
+                    df=benchmark_df,
+                    stats=summarize_stats(benchmark_df),
+                    bundle=benchmark_bundle,
+                    thresholds=thresholds,
+                    event_threshold=event_threshold,
+                    section_prefix="2. 벤치마크 종목",
+                )
+                try:
+                    render_compare_section(
+                        main_df=base_df,
+                        main_bundle=bundle,
+                        benchmark_df=benchmark_df,
+                        benchmark_bundle=benchmark_bundle,
+                        section_prefix="3. 분석 대상 vs 벤치마크",
+                    )
+                except Exception as e:
+                    st.warning(f"벤치마크 비교를 건너뛰었습니다: {e}")
 
         if show_krw:
             with tab_objs[1]:
@@ -1337,16 +1412,33 @@ if run:
                         currency="KRW",
                     )
 
-                    render_main_block(
+                    render_asset_section(
                         df=krw_df,
                         stats=krw_stats,
                         bundle=krw_bundle,
                         thresholds=thresholds,
-                        benchmark_bundle=bench_bundle_krw,
-                        benchmark_df=bench_df_krw,
                         event_threshold=event_threshold,
-                        section_prefix="원화 기준 ",
+                        section_prefix="1. 분석 대상 종목 (원화 기준)",
                     )
+                    if bench_bundle_krw is not None and bench_df_krw is not None:
+                        render_asset_section(
+                            df=bench_df_krw,
+                            stats=summarize_stats(bench_df_krw),
+                            bundle=bench_bundle_krw,
+                            thresholds=thresholds,
+                            event_threshold=event_threshold,
+                            section_prefix="2. 벤치마크 종목 (원화 기준)",
+                        )
+                        try:
+                            render_compare_section(
+                                main_df=krw_df,
+                                main_bundle=krw_bundle,
+                                benchmark_df=bench_df_krw,
+                                benchmark_bundle=bench_bundle_krw,
+                                section_prefix="3. 분석 대상 vs 벤치마크 (원화 기준)",
+                            )
+                        except Exception as e:
+                            st.warning(f"원화 기준 벤치마크 비교를 건너뛰었습니다: {e}")
 
                     with st.expander("환율 및 원화 환산 데이터 보기"):
                         fx_aligned = usdkrw_overlap.reindex(price_overlap.index.union(usdkrw_overlap.index)).sort_index().ffill().reindex(price_overlap.index)
