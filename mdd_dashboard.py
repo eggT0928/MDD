@@ -29,7 +29,7 @@ st.set_page_config(
 
 st.title("📉 MDD 계산기 대시보드")
 st.caption(
-    "최대낙폭(MDD) 분석, 누적수익률, 낙폭 사건 로그, 벤치마크 비교, 백테스트 요약표까지 한 번에 보는 Streamlit 버전입니다."
+    "최대낙폭(MDD) 분석, 누적수익률, 낙폭 사건 로그, 벤치마크 비교, 백테스트 요약표까지 한 번에 보는 대시보드입니다."
 )
 
 TRADING_DAYS = 252
@@ -299,7 +299,6 @@ def fetch_usdkrw_series() -> pd.Series:
 
     csv_pre = pd.Series(dtype=float)
     yahoo_post = pd.Series(dtype=float)
-    fdr_post = pd.Series(dtype=float)
 
     # 1) 업로드/로컬 CSV: 2003-12-01 이전 구간 전용
     csv_path_note = None
@@ -330,31 +329,11 @@ def fetch_usdkrw_series() -> pd.Series:
     except Exception as e:
         error_map["Yahoo Finance"] = str(e)
 
-    # 3) Yahoo가 실패했을 때만 FinanceDataReader 후순위 사용
-    if yahoo_post.empty and fdr is not None:
-        try:
-            fx = fdr.DataReader("USD/KRW")
-            if fx is not None and not fx.empty:
-                close_col = "Close" if "Close" in fx.columns else fx.columns[0]
-                fdr_s = _clean_price_like_series(fx[close_col])
-                fdr_post = fdr_s.loc[fdr_s.index >= FX_YAHOO_CUTOFF].copy()
-                if not fdr_post.empty:
-                    source_ranges["FinanceDataReader"] = {
-                        "start": str(fdr_post.index.min().date()),
-                        "end": str(fdr_post.index.max().date()),
-                        "rows": f"{len(fdr_post):,}",
-                    }
-        except Exception as e:
-            error_map["FinanceDataReader"] = str(e)
-
     post_source_name = None
     post_series = pd.Series(dtype=float)
     if not yahoo_post.empty:
         post_source_name = "Yahoo Finance"
         post_series = yahoo_post
-    elif not fdr_post.empty:
-        post_source_name = "FinanceDataReader"
-        post_series = fdr_post
 
     parts = []
     used_sources = []
@@ -872,7 +851,7 @@ def indexed_return_chart(main_df: pd.DataFrame, main_label: str, benchmark_df: O
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=main_df.index, y=main_df["Indexed100"], mode="lines", name=main_label, line=dict(width=2.2, color=main_theme["primary"])))
     if benchmark_df is not None and benchmark_label is not None:
-        fig.add_trace(go.Scatter(x=benchmark_df.index, y=benchmark_df["Indexed100"], mode="lines", name=benchmark_label, line=dict(width=1.9, dash="dash", color=benchmark_theme["primary"])))
+        fig.add_trace(go.Scatter(x=benchmark_df.index, y=benchmark_df["Indexed100"], mode="lines", name=benchmark_label, line=dict(width=2.0, color=benchmark_theme["primary"])))
     fig.update_layout(
         title=title,
         height=430,
@@ -912,7 +891,7 @@ def styled_bucket_table(bucket_df: pd.DataFrame) -> pd.DataFrame:
 def compare_drawdown_chart(main_df: pd.DataFrame, main_label: str, benchmark_df: pd.DataFrame, benchmark_label: str, title: str, main_theme: Dict[str, str] = MAIN_THEME, benchmark_theme: Dict[str, str] = BENCH_THEME):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=main_df.index, y=main_df["Drawdown"] * 100, mode="lines", name=main_label, line=dict(width=2.0, color=main_theme["primary"]), fill="tozeroy", fillcolor=main_theme["fill"]))
-    fig.add_trace(go.Scatter(x=benchmark_df.index, y=benchmark_df["Drawdown"] * 100, mode="lines", name=benchmark_label, line=dict(width=1.9, dash="dash", color=benchmark_theme["primary"])))
+    fig.add_trace(go.Scatter(x=benchmark_df.index, y=benchmark_df["Drawdown"] * 100, mode="lines", name=benchmark_label, line=dict(width=2.0, color=benchmark_theme["primary"])))
     fig.update_layout(
         title=title,
         height=420,
@@ -1272,7 +1251,7 @@ if run:
                 fx_source_note = usdkrw_full.attrs.get("source_note")
                 fx_debug = usdkrw_full.attrs.get("debug_info", {})
                 if fx_source_note:
-                    st.caption(f"환율 소스: {fx_source_note} (2003-11-30까지는 로컬 CSV, 2003-12-01부터는 Yahoo/FDR 후순위 적용)")
+                    st.caption(f"환율 소스: {fx_source_note} (2003-11-30까지는 로컬 CSV, 2003-12-01부터는 Yahoo Finance 적용)")
 
                 with st.expander("환율 디버그 정보 보기"):
                     source_ranges = fx_debug.get("source_ranges", {})
@@ -1284,7 +1263,7 @@ if run:
 
                     st.markdown("**소스별 로딩 결과**")
                     debug_rows = []
-                    for src in ["로컬 CSV (DEXKOUS.csv)", "Yahoo Finance", "FinanceDataReader"]:
+                    for src in ["로컬 CSV (DEXKOUS.csv)", "Yahoo Finance"]:
                         if src in source_ranges:
                             info = source_ranges[src]
                             debug_rows.append(
@@ -1325,7 +1304,7 @@ if run:
                     )
                     st.dataframe(merged_info_df, width="stretch", hide_index=True)
 
-                st.info("원화 환산 환율은 `DEXKOUS.csv` 파일의 2003-11-30 이전 구간과, Yahoo Finance의 2003-12-01 이후 구간을 이어 붙여 사용합니다. Streamlit Cloud에서는 `DEXKOUS.csv`를 앱 파일과 같은 폴더에 두어야 합니다.")
+                st.info("원화 환산 환율은 `DEXKOUS.csv` 파일의 2003-11-30 이전 구간과, Yahoo Finance의 2003-12-01 이후 구간을 이어 붙여 사용합니다.")
 
                 fx_start = usdkrw_full.index.min().normalize()
                 fx_end = usdkrw_full.index.max().normalize()
