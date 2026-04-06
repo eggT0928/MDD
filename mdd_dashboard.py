@@ -260,81 +260,129 @@ def fetch_fred_daily_usdkrw_series() -> pd.Series:
 
 
 @st.cache_data(show_spinner=False)
-def fetch_usdkrw_series() -> pd.Series:
-    error_map: Dict[str, str] = {}
-    sources: Dict[str, pd.Series] = {}
-    source_ranges: Dict[str, Dict[str, str]] = {}
-
-    if fdr is not None:
-        try:
-            fx = fdr.DataReader("USD/KRW")
-            if fx is not None and not fx.empty:
-                close_col = "Close" if "Close" in fx.columns else fx.columns[0]
-                s = _clean_price_like_series(fx[close_col])
-                if not s.empty:
-                    sources["FinanceDataReader"] = s
-                    source_ranges["FinanceDataReader"] = {
-                        "start": str(s.index.min().date()),
-                        "end": str(s.index.max().date()),
-                        "rows": f"{len(s):,}",
-                    }
-        except Exception as e:
-            error_map["FinanceDataReader"] = str(e)
-
-    try:
-        y_s = _clean_price_like_series(fetch_with_yfinance("KRW=X").series)
-        if not y_s.empty:
-            sources["Yahoo Finance"] = y_s
-            source_ranges["Yahoo Finance"] = {
-                "start": str(y_s.index.min().date()),
-                "end": str(y_s.index.max().date()),
-                "rows": f"{len(y_s):,}",
-            }
-    except Exception as e:
-        error_map["Yahoo Finance"] = str(e)
-
-    try:
-        fred_s = fetch_fred_daily_usdkrw_series()
-        if not fred_s.empty:
-            sources["FRED DEXKOUS"] = fred_s
-            source_ranges["FRED DEXKOUS"] = {
-                "start": str(fred_s.index.min().date()),
-                "end": str(fred_s.index.max().date()),
-                "rows": f"{len(fred_s):,}",
-            }
-    except Exception as e:
-        error_map["FRED DEXKOUS"] = str(e)
-
-    if not sources:
-        joined = " | ".join([f"{k}: {v}" for k, v in error_map.items()])
-        raise RuntimeError(joined or "USD/KRW 환율 데이터를 불러오지 못했습니다.")
-
-    merged = None
-    merge_order = ["FRED DEXKOUS", "Yahoo Finance", "FinanceDataReader"]
-    used_sources = []
-    for name in merge_order:
-        s = sources.get(name)
-        if s is None or s.empty:
-            continue
-        if merged is None:
-            merged = s.copy()
-        else:
-            merged = s.combine_first(merged)
-        used_sources.append(name)
-
-    merged = _clean_price_like_series(merged)
-    merged.attrs["source_note"] = " + ".join(used_sources)
-    merged.attrs["debug_info"] = {
-        "used_sources": used_sources,
-        "source_ranges": source_ranges,
-        "errors": error_map,
-        "merged_start": str(merged.index.min().date()),
-        "merged_end": str(merged.index.max().date()),
-        "merged_rows": f"{len(merged):,}",
+def fetch_fred_daily_usdkrw_series():
+    """
+    FRED DEXKOUS 일간 USD/KRW 환율 로드
+    - 1차: fredgraph csv
+    - 2차: /data/DEXKOUS 텍스트 테이블
+    - DATE VALUE / DATE,DEXKOUS / DATE,VALUE 등 다양한 형식 허용
+    """
+    debug = {
+        "source": "FRED DEXKOUS",
+        "status": "실패/미사용",
+        "start": None,
+        "end": None,
+        "rows": None,
+        "error": None,
     }
-    return merged
 
+    urls = [
+        "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DEXKOUS",
+        "https://fred.stlouisfed.org/data/DEXKOUS",
+    ]
 
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/plain,text/csv,text/html,*/*",
+    }
+
+    last_error = None
+
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=20, headers=headers)
+            resp.raise_for_status()
+
+            text = resp.text.replace("\ufeff", "").strip()
+            if not text:
+                raise ValueError("빈 응답입니다.")
+
+            records = []
+
+            # 1) 우선 줄 단위 파싱
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+
+                # 주석/메타데이터 라인 스킵
+                upper_line = line.upper()
+                if upper_line.startswith("DATE ") or upper_line == "DATE VALUE":
+                    continue
+                if line.startswith("#"):
+                    continue
+
+                # YYYY-MM-DD 뒤에 구분자(쉼표/공백/탭/|)와 값이 오는 패턴
+                m = re.match(r"^(\d{4}-\d{2}-\d{2})[\s,\t|]+([0-9.]+|\.)$", line)
+                if not m:
+                    continue
+
+                dt = m.group(1)
+                val = m.group(2)
+
+                if val == ".":
+                    continue
+
+                records.append((dt, float(val)))
+
+            # 2) 줄 단위 파싱 실패 시 pandas csv 파싱 한 번 더 시도
+            if not records:
+                try:
+                    df_try = pd.read_csv(StringIO(text))
+                    df_try.columns = [str(c).strip() for c in df_try.columns]
+
+                    # DATE 컬럼 찾기
+                    date_col = None
+                    value_col = None
+                    for c in df_try.columns:
+                        if c.upper() == "DATE":
+                            date_col = c
+                        elif c.upper() in ("VALUE", "DEXKOUS"):
+                            value_col = c
+
+                    if date_col is not None and value_col is not None:
+                        tmp = df_try[[date_col, value_col]].copy()
+                        tmp[date_col] = pd.to_datetime(tmp[date_col], errors="coerce")
+                        tmp[value_col] = pd.to_numeric(tmp[value_col], errors="coerce")
+                        tmp = tmp.dropna()
+
+                        records = list(
+                            zip(
+                                tmp[date_col].dt.strftime("%Y-%m-%d"),
+                                tmp[value_col].astype(float),
+                            )
+                        )
+                except Exception:
+                    pass
+
+            if not records:
+                raise ValueError("FRED 응답 형식을 파싱하지 못했습니다.")
+
+            df = pd.DataFrame(records, columns=["Date", "USDKRW"])
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+            df["USDKRW"] = pd.to_numeric(df["USDKRW"], errors="coerce")
+            df = df.dropna().drop_duplicates(subset=["Date"]).sort_values("Date")
+            df = df.set_index("Date")["USDKRW"].astype(float)
+
+            if df.empty:
+                raise ValueError("파싱 후 데이터가 비어 있습니다.")
+
+            debug["status"] = "성공"
+            debug["start"] = df.index.min().date().isoformat()
+            debug["end"] = df.index.max().date().isoformat()
+            debug["rows"] = int(len(df))
+            debug["error"] = None
+
+            df.attrs["debug_info"] = debug
+            return df
+
+        except Exception as e:
+            last_error = str(e)
+
+    debug["error"] = last_error or "알 수 없는 오류"
+    s = pd.Series(dtype=float)
+    s.attrs["debug_info"] = debug
+    return s
 # -----------------------------
 # 계산 함수
 # -----------------------------
