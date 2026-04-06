@@ -1259,6 +1259,7 @@ if run:
                         benchmark_df=benchmark_df,
                         benchmark_bundle=benchmark_bundle,
                         section_prefix="3. 분석 대상 vs 벤치마크",
+                        theme=COMPARE_THEME,
                     )
                 except Exception as e:
                     st.warning(f"벤치마크 비교를 건너뛰었습니다: {e}")
@@ -1410,6 +1411,7 @@ if run:
                                 benchmark_df=bench_df_krw,
                                 benchmark_bundle=bench_bundle_krw,
                                 section_prefix="3. 분석 대상 vs 벤치마크 (원화 기준)",
+                                theme=COMPARE_THEME,
                             )
                         except Exception as e:
                             st.warning(f"원화 기준 벤치마크 비교를 건너뛰었습니다: {e}")
