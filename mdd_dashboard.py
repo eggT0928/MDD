@@ -1,6 +1,7 @@
 import re
 from dataclasses import dataclass
 from io import StringIO
+from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 
 import numpy as np
@@ -32,6 +33,11 @@ st.caption(
 )
 
 TRADING_DAYS = 252
+
+MAIN_THEME = {"primary": "#1f77b4", "secondary": "#6baed6", "fill": "rgba(31,119,180,0.16)", "bar": "#6baed6"}
+BENCH_THEME = {"primary": "#d62728", "secondary": "#ff9896", "fill": "rgba(214,39,40,0.16)", "bar": "#f28b82"}
+COMPARE_THEME = {"primary": "#9467bd"}
+FX_YAHOO_CUTOFF = pd.Timestamp("2003-12-01")
 
 
 # -----------------------------
@@ -242,175 +248,131 @@ def _clean_price_like_series(s: pd.Series) -> pd.Series:
 
 
 @st.cache_data(show_spinner=False)
-def fetch_fred_daily_usdkrw_series() -> pd.Series:
+def fetch_local_usdkrw_csv_series() -> pd.Series:
     """
-    FRED DEXKOUS 일간 USD/KRW 환율 로드.
-    - 1차: fredgraph.csv
-    - 2차: /data/DEXKOUS 테이블 텍스트
-    두 형식을 모두 유연하게 파싱한다.
+    사용자가 repo/app 폴더에 둔 DEXKOUS.csv를 읽어 USD/KRW 일간 환율 시계열로 변환합니다.
+    기대 파일명: DEXKOUS.csv
+    허용 컬럼 예시:
+    - observation_date, DEXKOUS
+    - DATE, VALUE
+    - DATE, DEXKOUS
     """
-    urls = [
-        "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DEXKOUS",
-        "https://fred.stlouisfed.org/data/DEXKOUS",
+    candidate_paths = [
+        Path.cwd() / "DEXKOUS.csv",
+        Path(__file__).resolve().parent / "DEXKOUS.csv",
+        Path("/mnt/data/DEXKOUS.csv"),
     ]
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "text/plain,text/csv,text/html,*/*",
-    }
 
-    last_error = None
+    csv_path = None
+    for path in candidate_paths:
+        if path.exists():
+            csv_path = path
+            break
 
-    for url in urls:
-        try:
-            resp = requests.get(url, timeout=20, headers=headers)
-            resp.raise_for_status()
-            text = resp.text.replace("\ufeff", "").strip()
-            if not text:
-                raise ValueError("빈 응답입니다.")
+    if csv_path is None:
+        raise FileNotFoundError("DEXKOUS.csv 파일을 찾지 못했습니다. 앱 파일과 같은 폴더에 두세요.")
 
-            records = []
+    df = pd.read_csv(csv_path, encoding="utf-8-sig")
+    df.columns = [str(c).strip() for c in df.columns]
+    upper_cols = {c.upper(): c for c in df.columns}
 
-            # 1) 라인 단위 직접 파싱 (DATE VALUE, DATE,VALUE 모두 허용)
-            for raw_line in text.splitlines():
-                line = raw_line.strip()
-                if not line:
-                    continue
-                upper_line = line.upper()
-                if upper_line in {"DATE VALUE", "DATE,VALUE", "DATE,DEXKOUS"}:
-                    continue
-                if line.startswith("#"):
-                    continue
+    date_col = upper_cols.get("OBSERVATION_DATE") or upper_cols.get("DATE")
+    value_col = upper_cols.get("DEXKOUS") or upper_cols.get("VALUE")
 
-                m = re.match(r"^(\d{4}-\d{2}-\d{2})[\s,\t|]+([0-9.]+|\.)$", line)
-                if not m:
-                    continue
+    if date_col is None or value_col is None:
+        raise ValueError("DEXKOUS.csv 컬럼 형식이 올바르지 않습니다. observation_date/DEXKOUS 또는 DATE/VALUE 형식을 사용하세요.")
 
-                dt, val = m.group(1), m.group(2)
-                if val == ".":
-                    continue
-                records.append((dt, float(val)))
-
-            # 2) pandas csv 파싱 fallback
-            if not records:
-                try:
-                    df_try = pd.read_csv(StringIO(text))
-                    df_try.columns = [str(c).strip() for c in df_try.columns]
-                    date_col = None
-                    value_col = None
-                    for c in df_try.columns:
-                        cu = c.upper()
-                        if cu == "DATE":
-                            date_col = c
-                        elif cu in ("VALUE", "DEXKOUS"):
-                            value_col = c
-                    if date_col is not None and value_col is not None:
-                        tmp = df_try[[date_col, value_col]].copy()
-                        tmp[date_col] = pd.to_datetime(tmp[date_col], errors="coerce")
-                        tmp[value_col] = pd.to_numeric(tmp[value_col], errors="coerce")
-                        tmp = tmp.dropna()
-                        records = list(zip(tmp[date_col].dt.strftime("%Y-%m-%d"), tmp[value_col].astype(float)))
-                except Exception:
-                    pass
-
-            # 3) /data/DEXKOUS 테이블 텍스트용 공백 구분 파싱 fallback
-            if not records:
-                try:
-                    df_try = pd.read_csv(StringIO(text), sep=r"\s+", engine="python")
-                    df_try.columns = [str(c).strip().upper() for c in df_try.columns]
-                    if "DATE" in df_try.columns:
-                        value_col = "VALUE" if "VALUE" in df_try.columns else ("DEXKOUS" if "DEXKOUS" in df_try.columns else None)
-                        if value_col is not None:
-                            tmp = df_try[["DATE", value_col]].copy()
-                            tmp["DATE"] = pd.to_datetime(tmp["DATE"], errors="coerce")
-                            tmp[value_col] = pd.to_numeric(tmp[value_col], errors="coerce")
-                            tmp = tmp.dropna()
-                            records = list(zip(tmp["DATE"].dt.strftime("%Y-%m-%d"), tmp[value_col].astype(float)))
-                except Exception:
-                    pass
-
-            if not records:
-                raise ValueError("FRED 응답을 파싱하지 못했습니다.")
-
-            df = pd.DataFrame(records, columns=["Date", "USDKRW"])
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-            df["USDKRW"] = pd.to_numeric(df["USDKRW"], errors="coerce")
-            df = df.dropna().drop_duplicates(subset=["Date"]).sort_values("Date")
-            s = df.set_index("Date")["USDKRW"].astype(float)
-            s = s[~s.index.duplicated(keep="last")]
-            if s.empty:
-                raise ValueError("파싱 후 데이터가 비어 있습니다.")
-            return s
-
-        except Exception as e:
-            last_error = f"{url} -> {e}"
-
-    raise ValueError(last_error or "FRED DEXKOUS 로딩 실패")
+    out = df[[date_col, value_col]].copy()
+    out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+    out[value_col] = pd.to_numeric(out[value_col], errors="coerce")
+    out = out.dropna().sort_values(date_col)
+    s = out.set_index(date_col)[value_col].astype(float)
+    s = _clean_price_like_series(s)
+    s.attrs["local_csv_path"] = str(csv_path)
+    return s
 
 
 @st.cache_data(show_spinner=False)
 def fetch_usdkrw_series() -> pd.Series:
     error_map: Dict[str, str] = {}
-    sources: Dict[str, pd.Series] = {}
     source_ranges: Dict[str, Dict[str, str]] = {}
 
-    if fdr is not None:
-        try:
-            fx = fdr.DataReader("USD/KRW")
-            if fx is not None and not fx.empty:
-                close_col = "Close" if "Close" in fx.columns else fx.columns[0]
-                s = _clean_price_like_series(fx[close_col])
-                if not s.empty:
-                    sources["FinanceDataReader"] = s
-                    source_ranges["FinanceDataReader"] = {
-                        "start": str(s.index.min().date()),
-                        "end": str(s.index.max().date()),
-                        "rows": f"{len(s):,}",
-                    }
-        except Exception as e:
-            error_map["FinanceDataReader"] = str(e)
+    csv_pre = pd.Series(dtype=float)
+    yahoo_post = pd.Series(dtype=float)
+    fdr_post = pd.Series(dtype=float)
 
+    # 1) 업로드/로컬 CSV: 2003-12-01 이전 구간 전용
+    csv_path_note = None
+    try:
+        csv_full = fetch_local_usdkrw_csv_series()
+        csv_path_note = csv_full.attrs.get("local_csv_path")
+        csv_pre = csv_full.loc[csv_full.index < FX_YAHOO_CUTOFF].copy()
+        if not csv_pre.empty:
+            source_ranges["로컬 CSV (DEXKOUS.csv)"] = {
+                "start": str(csv_pre.index.min().date()),
+                "end": str(csv_pre.index.max().date()),
+                "rows": f"{len(csv_pre):,}",
+                "path": csv_path_note or "-",
+            }
+    except Exception as e:
+        error_map["로컬 CSV (DEXKOUS.csv)"] = str(e)
+
+    # 2) Yahoo Finance: 2003-12-01 이후 구간 전용
     try:
         y_s = _clean_price_like_series(fetch_with_yfinance("KRW=X").series)
-        if not y_s.empty:
-            sources["Yahoo Finance"] = y_s
+        yahoo_post = y_s.loc[y_s.index >= FX_YAHOO_CUTOFF].copy()
+        if not yahoo_post.empty:
             source_ranges["Yahoo Finance"] = {
-                "start": str(y_s.index.min().date()),
-                "end": str(y_s.index.max().date()),
-                "rows": f"{len(y_s):,}",
+                "start": str(yahoo_post.index.min().date()),
+                "end": str(yahoo_post.index.max().date()),
+                "rows": f"{len(yahoo_post):,}",
             }
     except Exception as e:
         error_map["Yahoo Finance"] = str(e)
 
-    try:
-        fred_s = fetch_fred_daily_usdkrw_series()
-        if not fred_s.empty:
-            sources["FRED DEXKOUS"] = fred_s
-            source_ranges["FRED DEXKOUS"] = {
-                "start": str(fred_s.index.min().date()),
-                "end": str(fred_s.index.max().date()),
-                "rows": f"{len(fred_s):,}",
-            }
-    except Exception as e:
-        error_map["FRED DEXKOUS"] = str(e)
+    # 3) Yahoo가 실패했을 때만 FinanceDataReader 후순위 사용
+    if yahoo_post.empty and fdr is not None:
+        try:
+            fx = fdr.DataReader("USD/KRW")
+            if fx is not None and not fx.empty:
+                close_col = "Close" if "Close" in fx.columns else fx.columns[0]
+                fdr_s = _clean_price_like_series(fx[close_col])
+                fdr_post = fdr_s.loc[fdr_s.index >= FX_YAHOO_CUTOFF].copy()
+                if not fdr_post.empty:
+                    source_ranges["FinanceDataReader"] = {
+                        "start": str(fdr_post.index.min().date()),
+                        "end": str(fdr_post.index.max().date()),
+                        "rows": f"{len(fdr_post):,}",
+                    }
+        except Exception as e:
+            error_map["FinanceDataReader"] = str(e)
 
-    if not sources:
+    post_source_name = None
+    post_series = pd.Series(dtype=float)
+    if not yahoo_post.empty:
+        post_source_name = "Yahoo Finance"
+        post_series = yahoo_post
+    elif not fdr_post.empty:
+        post_source_name = "FinanceDataReader"
+        post_series = fdr_post
+
+    parts = []
+    used_sources = []
+    if not csv_pre.empty:
+        parts.append(csv_pre)
+        used_sources.append("로컬 CSV (DEXKOUS.csv, 2003-11-30까지)")
+    if post_source_name is not None and not post_series.empty:
+        parts.append(post_series)
+        used_sources.append(f"{post_source_name} (2003-12-01부터)")
+
+    if not parts:
         joined = " | ".join([f"{k}: {v}" for k, v in error_map.items()])
         raise RuntimeError(joined or "USD/KRW 환율 데이터를 불러오지 못했습니다.")
 
-    merged = None
-    merge_order = ["FRED DEXKOUS", "Yahoo Finance", "FinanceDataReader"]
-    used_sources = []
-    for name in merge_order:
-        s = sources.get(name)
-        if s is None or s.empty:
-            continue
-        if merged is None:
-            merged = s.copy()
-        else:
-            merged = s.combine_first(merged)
-        used_sources.append(name)
-
+    merged = pd.concat(parts).sort_index()
+    merged = merged[~merged.index.duplicated(keep="last")]
     merged = _clean_price_like_series(merged)
+
     merged.attrs["source_note"] = " + ".join(used_sources)
     merged.attrs["debug_info"] = {
         "used_sources": used_sources,
@@ -419,6 +381,8 @@ def fetch_usdkrw_series() -> pd.Series:
         "merged_start": str(merged.index.min().date()),
         "merged_end": str(merged.index.max().date()),
         "merged_rows": f"{len(merged):,}",
+        "csv_cutoff": str(FX_YAHOO_CUTOFF.date()),
+        "csv_path": csv_path_note or "-",
     }
     return merged
 
@@ -862,7 +826,7 @@ def format_price(v: float, currency: str) -> str:
 
 
 
-def drawdown_chart(df: pd.DataFrame, title: str):
+def drawdown_chart(df: pd.DataFrame, title: str, theme: Dict[str, str]):
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -870,8 +834,9 @@ def drawdown_chart(df: pd.DataFrame, title: str):
             y=df["Drawdown"] * 100,
             mode="lines",
             name="Drawdown",
-            line=dict(width=1.5),
+            line=dict(width=1.8, color=theme["primary"]),
             fill="tozeroy",
+            fillcolor=theme["fill"],
         )
     )
     fig.update_layout(
@@ -887,10 +852,10 @@ def drawdown_chart(df: pd.DataFrame, title: str):
 
 
 
-def price_and_high_chart(df: pd.DataFrame, title: str):
+def price_and_high_chart(df: pd.DataFrame, title: str, theme: Dict[str, str]):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines", name="현재가", line=dict(width=2)))
-    fig.add_trace(go.Scatter(x=df.index, y=df["High"], mode="lines", name="과거 최고가", line=dict(width=1.5, dash="dash")))
+    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines", name="현재가", line=dict(width=2.2, color=theme["primary"])))
+    fig.add_trace(go.Scatter(x=df.index, y=df["High"], mode="lines", name="과거 최고가", line=dict(width=1.5, dash="dash", color=theme["secondary"])))
     fig.update_layout(
         title=title,
         height=420,
@@ -903,11 +868,11 @@ def price_and_high_chart(df: pd.DataFrame, title: str):
 
 
 
-def indexed_return_chart(main_df: pd.DataFrame, main_label: str, benchmark_df: Optional[pd.DataFrame] = None, benchmark_label: Optional[str] = None, title: str = "누적 수익률 차트 (시작점 100)"):
+def indexed_return_chart(main_df: pd.DataFrame, main_label: str, benchmark_df: Optional[pd.DataFrame] = None, benchmark_label: Optional[str] = None, title: str = "누적 수익률 차트 (시작점 100)", main_theme: Dict[str, str] = MAIN_THEME, benchmark_theme: Dict[str, str] = BENCH_THEME):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=main_df.index, y=main_df["Indexed100"], mode="lines", name=main_label, line=dict(width=2.2)))
+    fig.add_trace(go.Scatter(x=main_df.index, y=main_df["Indexed100"], mode="lines", name=main_label, line=dict(width=2.2, color=main_theme["primary"])))
     if benchmark_df is not None and benchmark_label is not None:
-        fig.add_trace(go.Scatter(x=benchmark_df.index, y=benchmark_df["Indexed100"], mode="lines", name=benchmark_label, line=dict(width=1.8, dash="dash")))
+        fig.add_trace(go.Scatter(x=benchmark_df.index, y=benchmark_df["Indexed100"], mode="lines", name=benchmark_label, line=dict(width=1.9, dash="dash", color=benchmark_theme["primary"])))
     fig.update_layout(
         title=title,
         height=430,
@@ -920,10 +885,11 @@ def indexed_return_chart(main_df: pd.DataFrame, main_label: str, benchmark_df: O
 
 
 
-def bucket_bar_chart(bucket_df: pd.DataFrame, title: str):
+def bucket_bar_chart(bucket_df: pd.DataFrame, title: str, bar_color: str):
     chart_df = bucket_df.copy()
     chart_df["라벨"] = chart_df["MDD"].apply(bucket_label)
     fig = px.bar(chart_df, x="라벨", y="구간 비중", title=title)
+    fig.update_traces(marker_color=bar_color)
     fig.update_layout(height=360, margin=dict(l=20, r=20, t=60, b=20), xaxis_title="MDD 구간", yaxis_title="비중")
     fig.update_yaxes(tickformat=".1%")
     return fig
@@ -943,10 +909,10 @@ def styled_bucket_table(bucket_df: pd.DataFrame) -> pd.DataFrame:
 
 
 
-def compare_drawdown_chart(main_df: pd.DataFrame, main_label: str, benchmark_df: pd.DataFrame, benchmark_label: str, title: str):
+def compare_drawdown_chart(main_df: pd.DataFrame, main_label: str, benchmark_df: pd.DataFrame, benchmark_label: str, title: str, main_theme: Dict[str, str] = MAIN_THEME, benchmark_theme: Dict[str, str] = BENCH_THEME):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=main_df.index, y=main_df["Drawdown"] * 100, mode="lines", name=main_label, line=dict(width=2.0), fill="tozeroy"))
-    fig.add_trace(go.Scatter(x=benchmark_df.index, y=benchmark_df["Drawdown"] * 100, mode="lines", name=benchmark_label, line=dict(width=1.8, dash="dash")))
+    fig.add_trace(go.Scatter(x=main_df.index, y=main_df["Drawdown"] * 100, mode="lines", name=main_label, line=dict(width=2.0, color=main_theme["primary"]), fill="tozeroy", fillcolor=main_theme["fill"]))
+    fig.add_trace(go.Scatter(x=benchmark_df.index, y=benchmark_df["Drawdown"] * 100, mode="lines", name=benchmark_label, line=dict(width=1.9, dash="dash", color=benchmark_theme["primary"])))
     fig.update_layout(
         title=title,
         height=420,
@@ -962,7 +928,7 @@ def compare_drawdown_chart(main_df: pd.DataFrame, main_label: str, benchmark_df:
 def relative_strength_chart(main_df: pd.DataFrame, main_label: str, benchmark_df: pd.DataFrame, benchmark_label: str, title: str):
     rel = (main_df["Indexed100"] / benchmark_df["Indexed100"]) * 100
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=rel.index, y=rel, mode="lines", name=f"{main_label} / {benchmark_label}", line=dict(width=2.0)))
+    fig.add_trace(go.Scatter(x=rel.index, y=rel, mode="lines", name=f"{main_label} / {benchmark_label}", line=dict(width=2.0, color=COMPARE_THEME["primary"])))
     fig.update_layout(
         title=title,
         height=380,
@@ -1067,6 +1033,7 @@ def render_asset_section(
     thresholds: List[float],
     event_threshold: float,
     section_prefix: str,
+    theme: Dict[str, str],
 ):
     bucket_df = build_bucket_table(df, thresholds)
     metric_df = build_metrics_table(df, bundle.display_name)
@@ -1087,12 +1054,12 @@ def render_asset_section(
 
     left, right = st.columns([2, 1])
     with left:
-        st.plotly_chart(drawdown_chart(df, f"{section_prefix} · MDD 차트"), width="stretch")
+        st.plotly_chart(drawdown_chart(df, f"{section_prefix} · MDD 차트", theme), width="stretch")
     with right:
-        st.plotly_chart(bucket_bar_chart(bucket_df, f"{section_prefix} · MDD 구간 비중"), width="stretch")
+        st.plotly_chart(bucket_bar_chart(bucket_df, f"{section_prefix} · MDD 구간 비중", theme["bar"]), width="stretch")
 
-    st.plotly_chart(price_and_high_chart(df, f"{section_prefix} · 현재가 vs 과거 최고가"), width="stretch")
-    st.plotly_chart(indexed_return_chart(df, bundle.display_name, title=f"{section_prefix} · 누적 수익률 차트 (시작점 100)"), width="stretch")
+    st.plotly_chart(price_and_high_chart(df, f"{section_prefix} · 현재가 vs 과거 최고가", theme), width="stretch")
+    st.plotly_chart(indexed_return_chart(df, bundle.display_name, title=f"{section_prefix} · 누적 수익률 차트 (시작점 100)", main_theme=theme), width="stretch")
 
     st.markdown(f"#### {section_prefix} · 백테스트 결과표")
     st.dataframe(style_metric_table(metric_df).astype(str), width="stretch", hide_index=True)
@@ -1129,6 +1096,7 @@ def render_compare_section(
     benchmark_df: pd.DataFrame,
     benchmark_bundle: PriceBundle,
     section_prefix: str,
+    theme: Dict[str, str],
 ):
     aligned_main, aligned_bench = align_for_compare(main_df, benchmark_df)
     compare_metric_df = merge_metric_tables(
@@ -1250,7 +1218,7 @@ if run:
         st.caption(
             f"사용된 심볼: `{bundle.symbol_used}` · 전체 가능 기간: {bundle.series.index.min().date()} ~ {bundle.series.index.max().date()}"
         )
-        st.caption("가격 데이터는 수정종가 기준으로 계산합니다. Yahoo Finance는 auto_adjust=True로 받아 배당·분할 영향을 반영합니다.")
+        st.caption("가격 데이터는 수정종가 기준으로 계산합니다. Yahoo Finance는 auto_adjust=True로 받아 배당·분할 영향을 반영하므로, 실질적으로 Adj Close 기준과 같은 효과로 계산합니다.")
         if benchmark_bundle is not None:
             st.caption(
                 f"벤치마크: `{benchmark_bundle.symbol_used}` · {benchmark_bundle.display_name} · 전체 가능 기간: {benchmark_bundle.series.index.min().date()} ~ {benchmark_bundle.series.index.max().date()}"
@@ -1281,6 +1249,7 @@ if run:
                     thresholds=thresholds,
                     event_threshold=event_threshold,
                     section_prefix="2. 벤치마크 종목",
+                    theme=BENCH_THEME,
                 )
                 try:
                     render_compare_section(
@@ -1301,7 +1270,7 @@ if run:
                 fx_source_note = usdkrw_full.attrs.get("source_note")
                 fx_debug = usdkrw_full.attrs.get("debug_info", {})
                 if fx_source_note:
-                    st.caption(f"환율 소스: {fx_source_note} (겹치는 날짜는 앞쪽 소스를 우선 사용)")
+                    st.caption(f"환율 소스: {fx_source_note} (2003-11-30까지는 로컬 CSV, 2003-12-01부터는 Yahoo/FDR 후순위 적용)")
 
                 with st.expander("환율 디버그 정보 보기"):
                     source_ranges = fx_debug.get("source_ranges", {})
@@ -1313,7 +1282,7 @@ if run:
 
                     st.markdown("**소스별 로딩 결과**")
                     debug_rows = []
-                    for src in ["FRED DEXKOUS", "Yahoo Finance", "FinanceDataReader"]:
+                    for src in ["로컬 CSV (DEXKOUS.csv)", "Yahoo Finance", "FinanceDataReader"]:
                         if src in source_ranges:
                             info = source_ranges[src]
                             debug_rows.append(
@@ -1353,6 +1322,8 @@ if run:
                         ]
                     )
                     st.dataframe(merged_info_df, width="stretch", hide_index=True)
+
+                st.info("원화 환산 환율은 `DEXKOUS.csv` 파일의 2003-11-30 이전 구간과, Yahoo Finance의 2003-12-01 이후 구간을 이어 붙여 사용합니다. Streamlit Cloud에서는 `DEXKOUS.csv`를 앱 파일과 같은 폴더에 두어야 합니다.")
 
                 fx_start = usdkrw_full.index.min().normalize()
                 fx_end = usdkrw_full.index.max().normalize()
