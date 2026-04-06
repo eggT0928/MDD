@@ -866,9 +866,10 @@ def indexed_return_chart(main_df: pd.DataFrame, main_label: str, benchmark_df: O
         height=430,
         margin=dict(l=20, r=20, t=60, b=20),
         xaxis_title="날짜",
-        yaxis_title="지수화 수익률 (시작=100)",
+        yaxis_title="지수화 수익률 (시작=100, 로그스케일)",
         hovermode="x unified",
     )
+    fig.update_yaxes(type="log")
     return fig
 
 
