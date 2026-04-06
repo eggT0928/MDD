@@ -29,7 +29,7 @@ st.set_page_config(
 
 st.title("📉 MDD 계산기 대시보드")
 st.caption(
-    "최대낙폭(MDD) 분석, 누적수익률, 낙폭 사건 로그, 벤치마크 비교, 백테스트 요약표까지 한 번에 보는 대시보드입니다."
+    "최대낙폭(MDD) 분석, 누적수익률, 낙폭 사건 로그, 벤치마크 비교, 백테스트 요약표까지 한 번에 보는 Streamlit 버전입니다."
 )
 
 TRADING_DAYS = 252
@@ -787,10 +787,19 @@ def style_event_log(df: pd.DataFrame, currency: str) -> pd.DataFrame:
 
 
 def align_for_compare(main_df: pd.DataFrame, bench_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    common_index = main_df.index.intersection(bench_df.index)
-    if len(common_index) < 2:
+    compare_close = pd.concat(
+        [
+            main_df["Close"].rename("main"),
+            bench_df["Close"].rename("bench"),
+        ],
+        axis=1,
+        join="inner",
+    ).dropna()
+    if len(compare_close) < 2:
         raise ValueError("비교 대상과 겹치는 날짜가 너무 적어서 비교할 수 없습니다.")
-    return main_df.loc[common_index].copy(), bench_df.loc[common_index].copy()
+    aligned_main = build_price_frame(compare_close["main"])
+    aligned_bench = build_price_frame(compare_close["bench"])
+    return aligned_main, aligned_bench
 
 
 # -----------------------------
@@ -1140,7 +1149,7 @@ with st.sidebar:
     threshold_step = st.selectbox("MDD 구간 간격", [1, 2, 5, 10], index=2)
     max_bucket = st.selectbox("최대 하락률 구간", [50, 60, 70, 80, 90, 100], index=5)
     compare_enabled = st.checkbox("벤치마크 비교 사용", value=False)
-    benchmark_input = st.text_input("벤치마크 티커 / 코드", value="SPY", disabled=not compare_enabled)
+    benchmark_input = st.text_input("벤치마크 티커 / 코드", value="^SP500TR", disabled=not compare_enabled)
     event_threshold_pct = st.selectbox("낙폭 사건 로그 기준", [-5, -10, -15, -20, -30, -40, -50], index=1)
     run = st.button("조회", type="primary", width="stretch")
 
@@ -1150,7 +1159,7 @@ with st.sidebar:
         "- '직접 입력'일 때만 날짜 입력값을 사용합니다.\n"
         "- 한국 6자리 코드는 FDR 우선, 실패 시 Yahoo .KS/.KQ 순으로 조회합니다.\n"
         "- 해외자산이 USD 기준이면 원화 환산 탭을 같이 보여줍니다.\n"
-        "- 벤치마크 비교는 누적수익률 차트와 백테스트 결과표에 함께 반영됩니다.\n- UWP는 전고점 하회 → 전고점 회복까지 걸린 기간이며, 최소·평균·최장 회복기간을 달력일 기준으로 연·월·일 형태로 보여줍니다."
+        "- 벤치마크 기본값은 `^SP500TR`(S&P 500 Total Return)입니다.\n- 벤치마크 비교는 두 종목의 공통 날짜만 남긴 뒤 같은 시작점 100으로 재기준화합니다.\n- UWP는 전고점 하회 → 전고점 회복까지 걸린 기간이며, 최소·평균·최장 회복기간을 달력일 기준으로 연·월·일 형태로 보여줍니다."
     )
 
 
