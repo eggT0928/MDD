@@ -29,7 +29,7 @@ st.set_page_config(
 
 st.title("📉 MDD 계산기 대시보드")
 st.caption(
-    "최대낙폭(MDD) 분석, 누적수익률, 낙폭 사건 로그, 벤치마크 비교, 백테스트 요약표까지 한 번에 보는 대시보드입니다."
+    "최대낙폭(MDD) 분석, 누적수익률, 낙폭 사건 로그, 벤치마크 비교, 백테스트 요약표까지 한 번에 보는 Streamlit 버전입니다."
 )
 
 TRADING_DAYS = 252
@@ -1240,6 +1240,7 @@ if run:
                 thresholds=thresholds,
                 event_threshold=event_threshold,
                 section_prefix="1. 분석 대상 종목",
+                theme=MAIN_THEME,
             )
             if benchmark_bundle is not None and benchmark_df is not None:
                 render_asset_section(
@@ -1390,6 +1391,7 @@ if run:
                         thresholds=thresholds,
                         event_threshold=event_threshold,
                         section_prefix="1. 분석 대상 종목 (원화 기준)",
+                        theme=MAIN_THEME,
                     )
                     if bench_bundle_krw is not None and bench_df_krw is not None:
                         render_asset_section(
@@ -1399,6 +1401,7 @@ if run:
                             thresholds=thresholds,
                             event_threshold=event_threshold,
                             section_prefix="2. 벤치마크 종목 (원화 기준)",
+                            theme=BENCH_THEME,
                         )
                         try:
                             render_compare_section(
