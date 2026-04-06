@@ -261,8 +261,9 @@ def fetch_fred_daily_usdkrw_series() -> pd.Series:
 
 @st.cache_data(show_spinner=False)
 def fetch_usdkrw_series() -> pd.Series:
-    errors = []
+    error_map: Dict[str, str] = {}
     sources: Dict[str, pd.Series] = {}
+    source_ranges: Dict[str, Dict[str, str]] = {}
 
     if fdr is not None:
         try:
@@ -272,25 +273,41 @@ def fetch_usdkrw_series() -> pd.Series:
                 s = _clean_price_like_series(fx[close_col])
                 if not s.empty:
                     sources["FinanceDataReader"] = s
+                    source_ranges["FinanceDataReader"] = {
+                        "start": str(s.index.min().date()),
+                        "end": str(s.index.max().date()),
+                        "rows": f"{len(s):,}",
+                    }
         except Exception as e:
-            errors.append(f"FDR USD/KRW: {e}")
+            error_map["FinanceDataReader"] = str(e)
 
     try:
         y_s = _clean_price_like_series(fetch_with_yfinance("KRW=X").series)
         if not y_s.empty:
             sources["Yahoo Finance"] = y_s
+            source_ranges["Yahoo Finance"] = {
+                "start": str(y_s.index.min().date()),
+                "end": str(y_s.index.max().date()),
+                "rows": f"{len(y_s):,}",
+            }
     except Exception as e:
-        errors.append(f"Yahoo KRW=X: {e}")
+        error_map["Yahoo Finance"] = str(e)
 
     try:
         fred_s = fetch_fred_daily_usdkrw_series()
         if not fred_s.empty:
             sources["FRED DEXKOUS"] = fred_s
+            source_ranges["FRED DEXKOUS"] = {
+                "start": str(fred_s.index.min().date()),
+                "end": str(fred_s.index.max().date()),
+                "rows": f"{len(fred_s):,}",
+            }
     except Exception as e:
-        errors.append(f"FRED DEXKOUS: {e}")
+        error_map["FRED DEXKOUS"] = str(e)
 
     if not sources:
-        raise RuntimeError(" | ".join(errors))
+        joined = " | ".join([f"{k}: {v}" for k, v in error_map.items()])
+        raise RuntimeError(joined or "USD/KRW 환율 데이터를 불러오지 못했습니다.")
 
     merged = None
     merge_order = ["FRED DEXKOUS", "Yahoo Finance", "FinanceDataReader"]
@@ -307,6 +324,14 @@ def fetch_usdkrw_series() -> pd.Series:
 
     merged = _clean_price_like_series(merged)
     merged.attrs["source_note"] = " + ".join(used_sources)
+    merged.attrs["debug_info"] = {
+        "used_sources": used_sources,
+        "source_ranges": source_ranges,
+        "errors": error_map,
+        "merged_start": str(merged.index.min().date()),
+        "merged_end": str(merged.index.max().date()),
+        "merged_rows": f"{len(merged):,}",
+    }
     return merged
 
 
@@ -719,6 +744,8 @@ def style_event_log(df: pd.DataFrame, currency: str) -> pd.DataFrame:
     if df.empty:
         return df
     view = df.copy()
+    for col in ["진입일", "저점일", "회복일"]:
+        view[col] = view[col].astype(str)
     for col in ["진입 낙폭", "최저 낙폭"]:
         view[col] = view[col].map(lambda x: format_pct(x))
     for col in ["진입가", "당시 전고점", "저점가", "회복가"]:
@@ -955,11 +982,11 @@ def render_main_block(
 
     left, right = st.columns([2, 1])
     with left:
-        st.plotly_chart(drawdown_chart(df, f"{section_prefix}MDD 차트"), use_container_width=True)
+        st.plotly_chart(drawdown_chart(df, f"{section_prefix}MDD 차트"), width="stretch")
     with right:
-        st.plotly_chart(bucket_bar_chart(bucket_df, f"{section_prefix}MDD 구간 비중"), use_container_width=True)
+        st.plotly_chart(bucket_bar_chart(bucket_df, f"{section_prefix}MDD 구간 비중"), width="stretch")
 
-    st.plotly_chart(price_and_high_chart(df, f"{section_prefix}현재가 vs 과거 최고가"), use_container_width=True)
+    st.plotly_chart(price_and_high_chart(df, f"{section_prefix}현재가 vs 과거 최고가"), width="stretch")
 
     if aligned_main is not None and aligned_bench is not None and benchmark_bundle is not None:
         st.plotly_chart(
@@ -970,27 +997,27 @@ def render_main_block(
                 benchmark_bundle.display_name,
                 title=f"{section_prefix}누적 수익률 차트 (시작점 100, 벤치마크 포함)",
             ),
-            use_container_width=True,
+            width="stretch",
         )
     else:
         st.plotly_chart(
             indexed_return_chart(df, bundle.display_name, title=f"{section_prefix}누적 수익률 차트 (시작점 100)"),
-            use_container_width=True,
+            width="stretch",
         )
 
     st.markdown("#### 백테스트 결과표")
-    st.dataframe(style_metric_table(merged_metric_df), use_container_width=True, hide_index=True)
+    st.dataframe(style_metric_table(merged_metric_df), width="stretch", hide_index=True)
     st.caption("UWP는 전고점 하회 이후 다시 전고점을 회복하기까지 걸린 기간입니다. 이 표에서는 최소·평균·최장 회복기간을 함께 보여줘서 평균의 함정에 빠지지 않도록 했고, 달력일 기준 값을 연·월·일 형태로 표시합니다.")
 
     st.markdown("#### MDD 구간별 통계")
-    st.dataframe(styled_bucket_table(bucket_df), use_container_width=True, hide_index=True)
+    st.dataframe(styled_bucket_table(bucket_df), width="stretch", hide_index=True)
 
     st.markdown("#### 낙폭 사건 로그")
     event_log = detect_drawdown_events(df, threshold=event_threshold)
     if event_log.empty:
         st.info(f"선택한 기간에는 {event_threshold:.0%} 이하로 내려간 사건이 없습니다.")
     else:
-        st.dataframe(style_event_log(event_log, bundle.currency), use_container_width=True, hide_index=True)
+        st.dataframe(style_event_log(event_log, bundle.currency), width="stretch", hide_index=True)
         st.caption(
             f"사건 로그는 낙폭이 처음 {event_threshold:.0%} 이하로 진입한 시점부터, 다시 전고점을 회복할 때까지를 한 사건으로 묶어 보여줍니다."
         )
@@ -998,7 +1025,7 @@ def render_main_block(
     with st.expander("원시 데이터 보기"):
         raw_view = df.copy().reset_index().rename(columns={"index": "Date"})
         raw_view["Date"] = raw_view["Date"].dt.date.astype(str)
-        st.dataframe(raw_view, use_container_width=True, hide_index=True)
+        st.dataframe(raw_view, width="stretch", hide_index=True)
         csv = raw_view.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
             f"{section_prefix}CSV 다운로드",
@@ -1026,7 +1053,7 @@ with st.sidebar:
     compare_enabled = st.checkbox("벤치마크 비교 사용", value=False)
     benchmark_input = st.text_input("벤치마크 티커 / 코드", value="SPY", disabled=not compare_enabled)
     event_threshold_pct = st.selectbox("낙폭 사건 로그 기준", [-5, -10, -15, -20, -30, -40, -50], index=1)
-    run = st.button("조회", type="primary", use_container_width=True)
+    run = st.button("조회", type="primary", width="stretch")
 
     st.markdown("---")
     st.caption(
@@ -1112,8 +1139,60 @@ if run:
                     usdkrw_full = fetch_usdkrw_series()
 
                 fx_source_note = usdkrw_full.attrs.get("source_note")
+                fx_debug = usdkrw_full.attrs.get("debug_info", {})
                 if fx_source_note:
                     st.caption(f"환율 소스: {fx_source_note} (겹치는 날짜는 앞쪽 소스를 우선 사용)")
+
+                with st.expander("환율 디버그 정보 보기"):
+                    source_ranges = fx_debug.get("source_ranges", {})
+                    errors = fx_debug.get("errors", {})
+                    used_sources = fx_debug.get("used_sources", [])
+                    merged_start_dbg = fx_debug.get("merged_start")
+                    merged_end_dbg = fx_debug.get("merged_end")
+                    merged_rows_dbg = fx_debug.get("merged_rows")
+
+                    st.markdown("**소스별 로딩 결과**")
+                    debug_rows = []
+                    for src in ["FRED DEXKOUS", "Yahoo Finance", "FinanceDataReader"]:
+                        if src in source_ranges:
+                            info = source_ranges[src]
+                            debug_rows.append(
+                                {
+                                    "소스": src,
+                                    "상태": "성공",
+                                    "시작일": info.get("start", "-"),
+                                    "종료일": info.get("end", "-"),
+                                    "행 수": info.get("rows", "-"),
+                                    "오류": "-",
+                                }
+                            )
+                        else:
+                            debug_rows.append(
+                                {
+                                    "소스": src,
+                                    "상태": "실패/미사용",
+                                    "시작일": "-",
+                                    "종료일": "-",
+                                    "행 수": "-",
+                                    "오류": errors.get(src, "-"),
+                                }
+                            )
+                    st.dataframe(pd.DataFrame(debug_rows), width="stretch", hide_index=True)
+
+                    st.markdown("**최종 병합 결과**")
+                    merged_info_df = pd.DataFrame(
+                        [
+                            {
+                                "사용된 소스": " + ".join(used_sources) if used_sources else "-",
+                                "최종 시작일": merged_start_dbg or "-",
+                                "최종 종료일": merged_end_dbg or "-",
+                                "최종 행 수": merged_rows_dbg or "-",
+                                "분석 종목 시작일": str(actual_start.date()),
+                                "분석 종목 종료일": str(actual_end.date()),
+                            }
+                        ]
+                    )
+                    st.dataframe(merged_info_df, width="stretch", hide_index=True)
 
                 fx_start = usdkrw_full.index.min().normalize()
                 fx_end = usdkrw_full.index.max().normalize()
@@ -1194,7 +1273,7 @@ if run:
                                 "Close(KRW)": price_krw.values,
                             }
                         )
-                        st.dataframe(krw_view, use_container_width=True, hide_index=True)
+                        st.dataframe(krw_view, width="stretch", hide_index=True)
                         csv2 = krw_view.to_csv(index=False).encode("utf-8-sig")
                         st.download_button("원화 환산 CSV 다운로드", csv2, file_name="mdd_krw_data.csv", mime="text/csv")
 
